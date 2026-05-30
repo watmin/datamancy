@@ -25,12 +25,6 @@ export interface ServerInfo {
   version: string;
 }
 
-export interface InitializeParams {
-  protocolVersion: string;
-  capabilities?: Record<string, unknown>;
-  clientInfo?: { name: string; version: string };
-}
-
 export interface InitializeResult {
   protocolVersion: string;
   capabilities: {

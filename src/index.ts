@@ -5,14 +5,15 @@
  *
  * Zero runtime dependencies. Every line of code in the trust-critical
  * path lives in this repo. Node 20+ provides everything we need:
- * node:crypto for Ed25519 + SHA-256, node:readline for stdio framing,
+ * node:crypto for ECDSA P-256 + SHA-256, node:readline for stdio framing,
  * global fetch for HTTP.
  *
- * Trust model: LIVING. The pinned Ed25519 public key (src/pinned-pubkey.ts)
- * is the only constant — it verifies ANY manifest the offline key signs,
- * including ones that don't exist yet. So the website is the content: edit
- * a spell, re-sign, push, and every consumer sees it next call. No manifest
- * hash is pinned; there is no republish-per-spell.
+ * Trust model: LIVING. The pinned ECDSA P-256 public key
+ * (src/pinned-pubkey.ts) is the only constant — it verifies ANY manifest the
+ * matching key (held non-exportably in AWS KMS) signs, including ones that
+ * don't exist yet. So the website is the content: edit a spell, re-sign,
+ * push, and every consumer sees it next call. No manifest hash is pinned;
+ * there is no republish-per-spell.
  *
  * It's a static website, so this adapter is stateless: no boot snapshot, no
  * reload verb. Every list/read fetches the manifest FRESH and verifies it,
@@ -159,17 +160,15 @@ async function runServer(): Promise<void> {
       };
     },
     readResource: async ({ uri }) => {
-      const fetched = await grimoire.read(uri);
+      const { fetched, setChange } = await grimoire.read(uri);
       // If this cast revealed a spell-SET change since the client last listed,
       // nudge it to re-source the grimoire — the notice lands at point of use.
       // (Live mode only; a frozen pin never changes its set.)
-      const change = grimoire.lastSetChange;
-      if (change && !pinHash && !version) {
-        grimoire.lastSetChange = null;
+      if (setChange && !pinHash && !version) {
         log(
-          `update @ ${change.version}: spells added ` +
-            `[${change.added.join(", ") || "—"}], removed ` +
-            `[${change.removed.join(", ") || "—"}] — re-source the grimoire.`,
+          `update @ ${setChange.version}: spells added ` +
+            `[${setChange.added.join(", ") || "—"}], removed ` +
+            `[${setChange.removed.join(", ") || "—"}] — re-source the grimoire.`,
         );
         server.sendNotification("notifications/resources/list_changed");
       }

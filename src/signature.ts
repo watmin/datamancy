@@ -19,20 +19,22 @@
 
 import { createPublicKey, verify, type KeyObject } from "node:crypto";
 import { PINNED_PUBKEY_PEM } from "./pinned-pubkey.js";
+import { DatamancyError } from "./errors.js";
 
 const PUBKEY: KeyObject = createPublicKey({
   key: PINNED_PUBKEY_PEM,
   format: "pem",
 });
 
-export class SignatureFetchError extends Error {
+export class SignatureFetchError extends DatamancyError {
+  readonly severity = "transport";
   constructor(public url: string, public cause?: unknown) {
     super(`Failed to fetch signature from ${url}: ${cause}`);
-    this.name = "SignatureFetchError";
   }
 }
 
-export class SignatureInvalidError extends Error {
+export class SignatureInvalidError extends DatamancyError {
+  readonly severity = "verification";
   constructor(public manifestUrl: string, public signatureUrl: string) {
     super(
       `Signature verification FAILED. ` +
@@ -40,7 +42,6 @@ export class SignatureInvalidError extends Error {
         `The signature does not match the manifest content under the pinned ` +
         `public key. Manifest REJECTED — no content will be loaded.`,
     );
-    this.name = "SignatureInvalidError";
   }
 }
 

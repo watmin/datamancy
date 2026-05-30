@@ -9,15 +9,17 @@
 
 import { createHash } from "node:crypto";
 import type { Resource } from "./manifest.js";
+import { DatamancyError } from "./errors.js";
 
-export class ResourceFetchError extends Error {
+export class ResourceFetchError extends DatamancyError {
+  readonly severity = "transport";
   constructor(public resource: Resource, public cause?: unknown) {
     super(`Failed to fetch resource ${resource.name} at ${resource.uri}: ${cause}`);
-    this.name = "ResourceFetchError";
   }
 }
 
-export class HashMismatchError extends Error {
+export class HashMismatchError extends DatamancyError {
+  readonly severity = "verification";
   constructor(
     public resource: Resource,
     public expectedSha256: string,
@@ -28,11 +30,11 @@ export class HashMismatchError extends Error {
         `expected ${expectedSha256}, got ${actualSha256}. ` +
         `Resource REJECTED — content will not be passed to the LLM.`,
     );
-    this.name = "HashMismatchError";
   }
 }
 
-export class SizeMismatchError extends Error {
+export class SizeMismatchError extends DatamancyError {
+  readonly severity = "verification";
   constructor(
     public resource: Resource,
     public expectedSize: number,
@@ -43,7 +45,6 @@ export class SizeMismatchError extends Error {
         `expected ${expectedSize} bytes, got ${actualSize}. ` +
         `Resource REJECTED.`,
     );
-    this.name = "SizeMismatchError";
   }
 }
 
@@ -51,8 +52,6 @@ export interface FetchedResource {
   resource: Resource;
   /** UTF-8 text content of the resource (post-verification). */
   text: string;
-  /** Raw bytes (post-verification), in case binary handling is added later. */
-  bytes: Uint8Array;
 }
 
 /**
@@ -90,5 +89,5 @@ export async function fetchAndVerify(
   }
 
   const text = Buffer.from(bytes).toString("utf-8");
-  return { resource, text, bytes };
+  return { resource, text };
 }

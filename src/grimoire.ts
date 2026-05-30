@@ -12,7 +12,7 @@
  *                         Fetches each spell's immutable `blob`. Loaded once,
  *                         then frozen — it can never change by construction.
  *
- * Trust in both modes: every manifest is Ed25519/P-256 verified against the
+ * Trust in both modes: every manifest is ECDSA P-256 verified against the
  * pinned public key; every spell body is SHA-256 verified before release.
  * Pinned mode adds: the manifest's own bytes must hash to the pinned value.
  *
@@ -29,20 +29,19 @@ import {
   type Manifest,
   type Resource,
 } from "./manifest.js";
+import { fetchSignature, verifyManifestSignature } from "./signature.js";
+import { fetchAndVerify, type FetchedResource } from "./resources.js";
 import {
-  fetchSignature,
-  verifyManifestSignature,
-  SignatureInvalidError,
-} from "./signature.js";
-import {
-  fetchAndVerify,
-  HashMismatchError,
-  SizeMismatchError,
-  type FetchedResource,
-} from "./resources.js";
+  DatamancyError,
+  isVerificationFailure,
+  UnknownResourceError,
+  BadPinError,
+  VersionNotFoundError,
+} from "./errors.js";
 
 /** A pinned manifest whose bytes don't hash to the requested pin. */
-export class PinMismatchError extends Error {
+export class PinMismatchError extends DatamancyError {
+  readonly severity = "verification";
   constructor(
     public expected: string,
     public actual: string,
@@ -53,29 +52,18 @@ export class PinMismatchError extends Error {
         `sha256:${actual}. The bytes served for this pinned version do not ` +
         `match the requested hash — REFUSING.`,
     );
-    this.name = "PinMismatchError";
   }
-}
-
-/** "Got bytes, and they're wrong" — loud. Distinct from transport failure. */
-function isVerificationFailure(err: unknown): boolean {
-  return (
-    err instanceof SignatureInvalidError ||
-    err instanceof HashMismatchError ||
-    err instanceof SizeMismatchError ||
-    err instanceof PinMismatchError
-  );
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
-// Timeout policy (live mode). Cold start gets a generous budget; once a
-// verified memo exists, warm fetches are bounded ~3x the measured baseline
-// (clamped) so a degraded network bails to last-known-good fast.
+// Timeout policy. Cold start (no fallback) gets a generous budget; once a
+// verified memo exists, a fetch is bounded so a genuinely STUCK one bails to
+// last-known-good. A FIXED, generous bound — not a per-fetch guess derived
+// from one noisy baseline sample, which would race a slow-but-fine fetch into
+// serving stale. The bound is a hang backstop, not a freshness deadline.
 const COLD_TIMEOUT_MS = 15_000;
-const WARM_MULTIPLIER = 3;
-const WARM_FLOOR_MS = 750;
-const WARM_CEIL_MS = 5_000;
+const WARM_TIMEOUT_MS = 5_000;
 
 export interface GrimoireConfig {
   /** Origin, e.g. "https://datamancy.dev". */
@@ -91,10 +79,15 @@ export interface VersionInfo {
   version: string;
   /** The content address you pin: the manifest's own SHA-256. */
   hash: string;
-  /** Unix-seconds stamp. */
-  epoch?: number;
   /** Number of spells in this version. */
   resources: number;
+}
+
+/** A change to the SPELL SET (names added/removed) — not a content edit. */
+export interface SpellSetChange {
+  version: string;
+  added: string[];
+  removed: string[];
 }
 
 export class Grimoire {
@@ -108,15 +101,10 @@ export class Grimoire {
   /** Pinned content is immutable, so it loads exactly once and freezes. */
   private frozenManifest: Manifest | null = null;
   private contentMemo = new Map<string, FetchedResource>();
-  private baselineMs: number | null = null;
   /** SHA-256 of the most recently loaded manifest — the current version id. */
   loadedHash: string | null = null;
   /** Sorted spell-name set last seen — detects spell add/remove (live mode). */
   private knownSpellSet: string | null = null;
-  /** Set-change detected on the most recent cast, for the handler to surface
-   * as a list_changed nudge. Consumed (nulled) after it's reported. */
-  lastSetChange: { version: string; added: string[]; removed: string[] } | null =
-    null;
 
   constructor(
     config: GrimoireConfig,
@@ -126,10 +114,7 @@ export class Grimoire {
     this.version = config.version ?? null;
     if (config.pinHash) {
       if (!HEX64.test(config.pinHash)) {
-        throw new Error(
-          `DATAMANCY_PIN must be a 64-char hex SHA-256 (optionally ` +
-            `"sha256:"-prefixed); got "${config.pinHash}".`,
-        );
+        throw new BadPinError(config.pinHash);
       }
       this.mode = "pinned";
       this.pinHash = config.pinHash;
@@ -168,11 +153,9 @@ export class Grimoire {
     return new URL(pathOrUrl, `${this.site}/`).toString();
   }
 
-  /** Cold (no fallback) gets a generous budget; warm is bounded tight. */
+  /** Cold (no fallback) gets a generous budget; warm has a fixed backstop. */
   private timeoutFor(haveMemo: boolean): number {
-    if (!haveMemo) return COLD_TIMEOUT_MS;
-    const adaptive = WARM_MULTIPLIER * (this.baselineMs ?? WARM_CEIL_MS);
-    return Math.min(Math.max(adaptive, WARM_FLOOR_MS), WARM_CEIL_MS);
+    return haveMemo ? WARM_TIMEOUT_MS : COLD_TIMEOUT_MS;
   }
 
   /**
@@ -223,7 +206,8 @@ export class Grimoire {
   /** Current resource list, with uris resolved to the configured origin. */
   async list(): Promise<Resource[]> {
     const manifest = await this.loadManifest();
-    this.syncSpellSet(manifest, false); // the client now sees the current set
+    // The client now sees the current set — advance the baseline.
+    this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
     return manifest.resources.map((r) => ({ ...r, uri: this.resolve(r.uri) }));
   }
 
@@ -232,17 +216,23 @@ export class Grimoire {
    * pinned mode fetches the immutable `blob`. Either way the content is
    * SHA-256 + size verified against the manifest entry.
    */
-  async read(uri: string): Promise<FetchedResource> {
+  async read(
+    uri: string,
+  ): Promise<{ fetched: FetchedResource; setChange: SpellSetChange | null }> {
     const manifest = await this.loadManifest();
-    this.syncSpellSet(manifest, true); // cast time: detect spell add/remove
+    // Detect a spell-SET change vs what the client last saw, then advance the
+    // baseline — both synchronous (no await between), so concurrent casts
+    // cannot lose or misattribute it. Returned as a value, never stashed in
+    // shared state for a caller to race over.
+    const setChange = Grimoire.spellSetDiff(this.knownSpellSet, manifest);
+    this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
+
     // The client passes the resolved (absolute) uri we exposed in list().
     const resource = manifest.resources.find(
       (r) => this.resolve(r.uri) === uri,
     );
     if (!resource) {
-      throw new Error(
-        `Unknown resource: ${uri}. Not present in the verified manifest.`,
-      );
+      throw new UnknownResourceError(uri);
     }
     const path =
       this.mode === "pinned" ? (resource.blob ?? resource.uri) : resource.uri;
@@ -253,12 +243,12 @@ export class Grimoire {
     try {
       const fetched = await fetchAndVerify(resource, signal, fetchUrl);
       this.contentMemo.set(uri, fetched); // remember ONLY verified-good
-      return fetched;
+      return { fetched, setChange };
     } catch (err) {
       const memo = this.contentMemo.get(uri);
       if (memo) {
         this.warnFallback(err, uri);
-        return memo;
+        return { fetched: memo, setChange };
       }
       throw err;
     }
@@ -273,16 +263,8 @@ export class Grimoire {
       this.pinHash = await this.resolveVersion(this.version);
       this.log(`resolved version ${this.version} → sha256:${this.pinHash}`);
     }
-    const t0 = Date.now();
     const manifest = await this.loadManifest();
-    this.baselineMs = Date.now() - t0;
     this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
-    if (this.mode === "live") {
-      this.log(
-        `baseline latency ${this.baselineMs}ms → warm fetch bound ` +
-          `${this.timeoutFor(true)}ms (serve last-known-good past that)`,
-      );
-    }
     return manifest;
   }
 
@@ -308,7 +290,6 @@ export class Grimoire {
     return {
       version: m.serverInfo.version,
       hash,
-      epoch: m.epoch,
       resources: m.resources.length,
     };
   }
@@ -325,7 +306,7 @@ export class Grimoire {
   static spellSetDiff(
     prevKey: string | null,
     manifest: Manifest,
-  ): { version: string; added: string[]; removed: string[] } | null {
+  ): SpellSetChange | null {
     const names = manifest.resources.map((r) => r.name);
     const key = Grimoire.spellSetKey(manifest.resources);
     if (prevKey === null || prevKey === key) return null;
@@ -338,61 +319,47 @@ export class Grimoire {
     };
   }
 
-  /**
-   * Reconcile the known spell set with a just-loaded manifest. On a cast
-   * (read), if the SET changed (a spell added/removed since the client last
-   * saw the list), stash it so the server can nudge the client to re-source
-   * the grimoire — the notice lands when they try to use it. Content edits
-   * (same names, new bytes) are NOT a set change; served fresh on the cast.
-   */
-  private syncSpellSet(manifest: Manifest, reportOnCast: boolean): void {
-    if (reportOnCast) {
-      const diff = Grimoire.spellSetDiff(this.knownSpellSet, manifest);
-      if (diff) this.lastSetChange = diff;
-    }
-    this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
-  }
-
   /** The current (latest) version. */
   async currentVersion(): Promise<VersionInfo> {
     const { hash, manifest } = await this.fetchOne(this.liveManifestUrl(), null);
     return Grimoire.info(hash, manifest);
   }
 
-  /** Walk the signed chain from latest, newest first (each hop verified). */
-  async listVersions(limit = 50): Promise<VersionInfo[]> {
-    const out: VersionInfo[] = [];
+  /**
+   * Walk the signed chain from latest, newest first, yielding each verified
+   * (hash, manifest). Each hop is signature-verified and hash-asserted against
+   * the link it was reached by — tamper-evident, like git history. The single
+   * home for chain traversal; listVersions and resolveVersion both consume it.
+   */
+  private async *walkChain(
+    limit = Number.POSITIVE_INFINITY,
+  ): AsyncGenerator<{ hash: string; manifest: Manifest }> {
     let url = this.liveManifestUrl();
     let expect: string | null = null;
     for (let i = 0; i < limit; i++) {
-      const { hash, manifest } = await this.fetchOne(url, expect);
-      out.push(Grimoire.info(hash, manifest));
-      if (!manifest.previous) break;
-      expect = manifest.previous.replace(/^sha256:/, "");
+      const hop = await this.fetchOne(url, expect);
+      yield hop;
+      if (!hop.manifest.previous) return;
+      expect = hop.manifest.previous.replace(/^sha256:/, "");
       url = this.snapshotManifestUrl(expect);
+    }
+  }
+
+  /** Walk the signed chain from latest, newest first (each hop verified). */
+  async listVersions(limit = 50): Promise<VersionInfo[]> {
+    const out: VersionInfo[] = [];
+    for await (const { hash, manifest } of this.walkChain(limit)) {
+      out.push(Grimoire.info(hash, manifest));
     }
     return out;
   }
 
-  /**
-   * Walk the signed chain from latest, following `previous`, until
-   * serverInfo.version matches. Each hop is signature-verified and
-   * hash-asserted against the link it was reached by — tamper-evident, like
-   * git history.
-   */
+  /** Resolve a version label to its manifest hash by walking the chain. */
   private async resolveVersion(version: string): Promise<string> {
-    let url = this.liveManifestUrl();
-    let expect: string | null = null;
-    for (let hop = 0; hop < 100_000; hop++) {
-      const { hash, manifest } = await this.fetchOne(url, expect);
+    for await (const { hash, manifest } of this.walkChain()) {
       if (manifest.serverInfo.version === version) return hash;
-      if (!manifest.previous) break;
-      expect = manifest.previous.replace(/^sha256:/, "");
-      url = this.snapshotManifestUrl(expect);
     }
-    throw new Error(
-      `Version "${version}" not found in the manifest chain at ${this.site}.`,
-    );
+    throw new VersionNotFoundError(version, this.site);
   }
 
   private warnFallback(err: unknown, what: string): void {

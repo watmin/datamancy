@@ -26,8 +26,8 @@ test("live: lists, reads, and verifies against the real pinned key", { skip: gat
   const list = await g.list();
   const grim = list.find((r) => r.name === "grimoire");
   assert.ok(grim, "grimoire spell present");
-  const read = await g.read(grim.uri);
-  assert.match(read.text, /grimoire/i);
+  const { fetched } = await g.read(grim.uri);
+  assert.match(fetched.text, /grimoire/i);
 });
 
 test("rejects a uri absent from the verified manifest", { skip: gate }, async () => {

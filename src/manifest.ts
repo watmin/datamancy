@@ -11,6 +11,8 @@
  * fetched content against these hashes before passing anything to the LLM.
  */
 
+import { DatamancyError } from "./errors.js";
+
 export interface Resource {
   /** Short identifier (e.g. "consonare", "intueri"). */
   name: string;
@@ -27,8 +29,6 @@ export interface Resource {
   sha256: string;
   /** Byte length of the resource content. */
   size: number;
-  /** Version string (typically the git short SHA at publish time). */
-  version?: string;
   /** Optional human-readable description (shown to the LLM). */
   description?: string;
 }
@@ -44,8 +44,6 @@ export interface Manifest {
     commit?: string;
   };
   practitioner?: string;
-  /** Unix-seconds version stamp (monotonic across publishes). */
-  epoch?: number;
   /** Content address of the previous manifest — the chain backpointer. */
   previous?: string | null;
   trust: {
@@ -91,7 +89,6 @@ function isManifest(x: unknown): x is Manifest {
   if (m.schemaVersion !== undefined && typeof m.schemaVersion !== "number") {
     return false;
   }
-  if (m.epoch !== undefined && typeof m.epoch !== "number") return false;
   if (
     m.previous !== undefined &&
     m.previous !== null &&
@@ -102,20 +99,20 @@ function isManifest(x: unknown): x is Manifest {
   return true;
 }
 
-export class ManifestFetchError extends Error {
+export class ManifestFetchError extends DatamancyError {
+  readonly severity = "transport";
   constructor(public url: string, public cause?: unknown) {
     super(`Failed to fetch manifest from ${url}: ${cause}`);
-    this.name = "ManifestFetchError";
   }
 }
 
-export class ManifestShapeError extends Error {
+export class ManifestShapeError extends DatamancyError {
+  readonly severity = "verification";
   constructor(public url: string) {
     super(
       `Manifest at ${url} did not validate against expected shape. ` +
         `Refusing to use it — the trust root is corrupt.`,
     );
-    this.name = "ManifestShapeError";
   }
 }
 
