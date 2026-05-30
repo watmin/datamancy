@@ -1,0 +1,36 @@
+# Publish datamancy to npm WITH provenance, via GitHub Actions Trusted
+# Publishing (tokenless OIDC). No NODE_AUTH_TOKEN secret exists: the workflow's
+# short-lived OIDC identity both authorizes the publish AND signs the Sigstore
+# provenance attestation linking the tarball to this commit + workflow.
+#
+# One-time setup (the single web step the npm CLI can't do): on npmjs.com →
+# the `datamancy` package → Settings → Trusted Publishing → add a GitHub Actions
+# publisher: org `watmin`, repo `datamancy`, workflow `publish.yml`.
+#
+# Then a release is: bump package.json, commit, `gh release create vX.Y.Z`.
+# The KMS manifest signing on datamancy.dev is a SEPARATE, deliberately-manual
+# trust act and never moves into CI.
+name: publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # grants the OIDC token used for auth + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Ensure an npm new enough for OIDC trusted publishing.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm test # gates the publish on the full suite (build + 103 tests)
+      - run: npm publish --provenance --access public
