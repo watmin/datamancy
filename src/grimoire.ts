@@ -82,8 +82,19 @@ export interface GrimoireConfig {
   site: string;
   /** DATAMANCY_PIN — a manifest SHA-256 (bare hex, "sha256:" stripped). */
   pinHash?: string | null;
-  /** DATAMANCY_VERSION — a friendly version (serverInfo.version / gitsha). */
+  /** DATAMANCY_VERSION — a friendly version (serverInfo.version / ISO8601). */
   version?: string | null;
+}
+
+export interface VersionInfo {
+  /** Friendly label (serverInfo.version — ISO8601 at publish time). */
+  version: string;
+  /** The content address you pin: the manifest's own SHA-256. */
+  hash: string;
+  /** Unix-seconds stamp. */
+  epoch?: number;
+  /** Number of spells in this version. */
+  resources: number;
 }
 
 export class Grimoire {
@@ -98,6 +109,8 @@ export class Grimoire {
   private frozenManifest: Manifest | null = null;
   private contentMemo = new Map<string, FetchedResource>();
   private baselineMs: number | null = null;
+  /** SHA-256 of the most recently loaded manifest — the current version id. */
+  loadedHash: string | null = null;
 
   constructor(
     config: GrimoireConfig,
@@ -182,12 +195,11 @@ export class Grimoire {
       ]);
       verifyManifestSignature(bytes, sig, url, sigUrl);
 
-      if (this.mode === "pinned") {
-        const actual = createHash("sha256").update(bytes).digest("hex");
-        if (actual !== this.pinHash) {
-          throw new PinMismatchError(this.pinHash as string, actual, url);
-        }
+      const actual = createHash("sha256").update(bytes).digest("hex");
+      if (this.mode === "pinned" && actual !== this.pinHash) {
+        throw new PinMismatchError(this.pinHash as string, actual, url);
       }
+      this.loadedHash = actual;
 
       const manifest = parseManifest(bytes, url);
       this.manifestMemo = manifest; // remember ONLY verified-good
@@ -265,32 +277,69 @@ export class Grimoire {
     return manifest;
   }
 
+  /** One verified hop: fetch + verify + hash + parse a manifest by URL. */
+  private async fetchOne(
+    url: string,
+    expectHash: string | null,
+  ): Promise<{ hash: string; manifest: Manifest }> {
+    const sigUrl = `${url}.sig`;
+    const [bytes, sig] = await Promise.all([
+      fetchManifestBytes(url),
+      fetchSignature(sigUrl),
+    ]);
+    verifyManifestSignature(bytes, sig, url, sigUrl);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    if (expectHash && hash !== expectHash) {
+      throw new PinMismatchError(expectHash, hash, url);
+    }
+    return { hash, manifest: parseManifest(bytes, url) };
+  }
+
+  private static info(hash: string, m: Manifest): VersionInfo {
+    return {
+      version: m.serverInfo.version,
+      hash,
+      epoch: m.epoch,
+      resources: m.resources.length,
+    };
+  }
+
+  /** The current (latest) version. */
+  async currentVersion(): Promise<VersionInfo> {
+    const { hash, manifest } = await this.fetchOne(this.liveManifestUrl(), null);
+    return Grimoire.info(hash, manifest);
+  }
+
+  /** Walk the signed chain from latest, newest first (each hop verified). */
+  async listVersions(limit = 50): Promise<VersionInfo[]> {
+    const out: VersionInfo[] = [];
+    let url = this.liveManifestUrl();
+    let expect: string | null = null;
+    for (let i = 0; i < limit; i++) {
+      const { hash, manifest } = await this.fetchOne(url, expect);
+      out.push(Grimoire.info(hash, manifest));
+      if (!manifest.previous) break;
+      expect = manifest.previous.replace(/^sha256:/, "");
+      url = this.snapshotManifestUrl(expect);
+    }
+    return out;
+  }
+
   /**
-   * Walk the signed manifest chain from latest, following `previous`, until
-   * serverInfo.version matches. Each hop is signature-verified and (past the
-   * head) hash-asserted against the link it was reached by — the chain is
-   * tamper-evident, like git history.
+   * Walk the signed chain from latest, following `previous`, until
+   * serverInfo.version matches. Each hop is signature-verified and
+   * hash-asserted against the link it was reached by — tamper-evident, like
+   * git history.
    */
   private async resolveVersion(version: string): Promise<string> {
     let url = this.liveManifestUrl();
-    let expectHash: string | null = null;
+    let expect: string | null = null;
     for (let hop = 0; hop < 100_000; hop++) {
-      const sigUrl = `${url}.sig`;
-      const [bytes, sig] = await Promise.all([
-        fetchManifestBytes(url),
-        fetchSignature(sigUrl),
-      ]);
-      verifyManifestSignature(bytes, sig, url, sigUrl);
-      const actual = createHash("sha256").update(bytes).digest("hex");
-      if (expectHash && actual !== expectHash) {
-        throw new PinMismatchError(expectHash, actual, url);
-      }
-      const manifest = parseManifest(bytes, url);
-      if (manifest.serverInfo.version === version) return actual;
-      if (!manifest.previous) break; // reached genesis without a match
-      const prev = manifest.previous.replace(/^sha256:/, "");
-      url = this.snapshotManifestUrl(prev);
-      expectHash = prev;
+      const { hash, manifest } = await this.fetchOne(url, expect);
+      if (manifest.serverInfo.version === version) return hash;
+      if (!manifest.previous) break;
+      expect = manifest.previous.replace(/^sha256:/, "");
+      url = this.snapshotManifestUrl(expect);
     }
     throw new Error(
       `Version "${version}" not found in the manifest chain at ${this.site}.`,

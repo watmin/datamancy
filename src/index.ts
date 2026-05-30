@@ -82,7 +82,46 @@ const version = process.env.DATAMANCY_VERSION?.trim() || null;
 
 const grimoire = new Grimoire({ site, pinHash, version }, log);
 
-async function main(): Promise<void> {
+// stdout is the MCP protocol channel in server mode, but the CLI sub-commands
+// (versions/current/help) don't run a server, so they print to stdout freely.
+function out(line = ""): void {
+  process.stdout.write(`${line}\n`);
+}
+
+async function runVersions(): Promise<void> {
+  const versions = await grimoire.listVersions();
+  out(`${versions.length} version(s) at ${site}, newest first:\n`);
+  for (const v of versions) {
+    out(`  ${v.version}   sha256:${v.hash}   (${v.resources} spells)`);
+  }
+  out(`\nFreeze one in your MCP client config "env":`);
+  out(`  DATAMANCY_PIN=sha256:<hash>     (exact, recommended)`);
+  out(`  DATAMANCY_VERSION=<label>       (friendly, e.g. ${versions[0]?.version ?? "ISO8601"})`);
+}
+
+async function runCurrent(): Promise<void> {
+  const v = await grimoire.currentVersion();
+  out(`version: ${v.version}`);
+  out(`hash:    sha256:${v.hash}`);
+  out(`spells:  ${v.resources}`);
+  out(`\nFreeze this exact grimoire — add to your MCP client config "env":`);
+  out(`  "DATAMANCY_PIN": "sha256:${v.hash}"`);
+}
+
+function printHelp(): void {
+  out(`datamancy v${PACKAGE_VERSION} — cryptographically verified static MCP\n`);
+  out(`Usage:`);
+  out(`  datamancy              run the MCP server over stdio (default)`);
+  out(`  datamancy current      show the current version + how to pin it`);
+  out(`  datamancy versions     list available versions (newest first)`);
+  out(`  datamancy --help       this help\n`);
+  out(`Env (consumer posture):`);
+  out(`  DATAMANCY_SITE=<origin>        fetch from a self-hosted mirror`);
+  out(`  DATAMANCY_PIN=sha256:<hash>    freeze to an immutable version`);
+  out(`  DATAMANCY_VERSION=<label>      freeze to a version by label`);
+}
+
+async function runServer(): Promise<void> {
   log(`booting v${PACKAGE_VERSION}`);
   log(`origin: ${site}`);
   log(`mode: ${grimoire.describe()}`);
@@ -92,9 +131,14 @@ async function main(): Promise<void> {
   const manifest = await grimoire.preflight();
   log(
     `preflight OK: ${manifest.resources.length} resources, signature ` +
-      `VERIFIED against pinned public key, server=` +
-      `${manifest.serverInfo.name}@${manifest.serverInfo.version}`,
+      `VERIFIED against pinned public key`,
   );
+  log(`version: ${manifest.serverInfo.version} (sha256:${grimoire.loadedHash})`);
+  if (pinHash || version) {
+    log(`frozen at sha256:${grimoire.loadedHash} — immutable`);
+  } else {
+    log(`to FREEZE this grimoire: DATAMANCY_PIN=sha256:${grimoire.loadedHash}`);
+  }
 
   const server = createMcpServer({
     serverInfo: {
@@ -133,6 +177,17 @@ async function main(): Promise<void> {
       `manifest fetched fresh per request, content upgrades live`,
   );
   await server.listen();
+}
+
+async function main(): Promise<void> {
+  const cmd = process.argv[2];
+  if (cmd === "versions") return runVersions();
+  if (cmd === "current") return runCurrent();
+  if (cmd === "--help" || cmd === "-h" || cmd === "help") {
+    printHelp();
+    return;
+  }
+  return runServer(); // default
 }
 
 main().catch((err) => {

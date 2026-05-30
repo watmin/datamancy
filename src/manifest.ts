@@ -38,7 +38,10 @@ export interface Manifest {
   schemaVersion?: number;
   serverInfo: {
     name: string;
+    /** Friendly version label (ISO8601 at publish time). */
     version: string;
+    /** Git short SHA the version was built from (traceability). */
+    commit?: string;
   };
   practitioner?: string;
   /** Unix-seconds version stamp (monotonic across publishes). */
