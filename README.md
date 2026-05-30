@@ -40,35 +40,47 @@ manifest, and exposes each spell as an MCP resource. Your LLM client
 shows them in the resources list; selecting one loads its content
 (post-verification).
 
-## Trust model (current state)
+## Trust model: living
 
-**Tier 1 (active):** Manifest contains per-resource SHA-256 hashes.
-Every fetched resource is hashed locally and compared. Mismatch = the
-package refuses to return the content and reports a structured error.
+The pinned **Ed25519 public key** (`src/pinned-pubkey.ts`) is the only
+constant. It verifies *any* manifest the offline private key signs —
+including ones that don't exist yet — exactly the way TLS pins a CA or SSH
+pins a host key. So **the website is the content**: edit a spell, re-sign
+the manifest, push, and every consumer sees it on the next call. There is
+no manifest hash baked into this package and no republish-per-spell.
 
-**Tier 2 (active):** The manifest itself is signed with an Ed25519
-detached signature (`manifest.json.sig` next to `manifest.json`). The
-matching public key is **pinned in this package's source**
-(`src/pinned-pubkey.ts`). On every boot, the package verifies the
-signature before parsing the manifest. Tampering with the manifest
-requires also possessing the offline private key — invalid signature =
-the adapter exits immediately and no content is loaded.
+**Layer 1 — per-resource hashes.** The manifest lists a SHA-256 for every
+spell. Each fetched resource is hashed locally and compared; mismatch =
+the content is refused and a structured error reported.
 
-**Tier 3 (planned):** The SHA-256 of the manifest itself will be baked
-into this package at publish time as defense-in-depth across the npm
-publish chain. Even if both the website and the signing key are
-compromised, tampering is detectable because the pinned manifest hash
-in the npm package source must also change to match.
+**Layer 2 — signed manifest.** The manifest is signed with an Ed25519
+detached signature (`manifest.json.sig`). Every load verifies it against
+the pinned public key before parsing. A manifest the key didn't sign is
+rejected and no content loads.
+
+**Stateless + always-fresh.** It's a static website, so this adapter holds
+no boot snapshot and has no reload command. Every list/read fetches the
+manifest fresh and verifies it, so content upgrades immediately. Boot does
+one preflight fetch+verify to fail fast on misconfiguration.
+
+**Resilience (write-only-on-verified memo).** Only verified content is ever
+remembered, so the memo can never hold anything forged. On a transient
+**transport** failure (timeout/DNS/5xx) the last-known-good is served with
+a quiet log. On a **verification** failure (bad signature/hash) the
+last-known-good is still served — the bad bytes are refused and never
+remembered — but the log is **loud**: a tamper is never silent. Warm
+fetches are bounded to ~3× the measured baseline latency, so a degraded
+network bails to last-known-good fast instead of hanging.
 
 ## What this defeats
 
 | Attack | Defended? |
 |---|---|
-| Tamper one spell file | ✓ Tier 1 (hash mismatch on fetch) |
-| Tamper manifest + spell files together | ✓ Tier 2 (signature invalid) |
-| Full website compromise + replace everything | ✓ Tier 2 (attacker lacks the private key) |
-| Website + private key both compromised | ✗ (Tier 3 will close this) |
-| Website + key + npm publish all compromised | (Game over) |
+| Tamper one spell file | ✓ Layer 1 (hash mismatch on fetch) |
+| Tamper manifest + spell files together | ✓ Layer 2 (signature invalid) |
+| Full website compromise + replace everything | ✓ Layer 2 (attacker lacks the offline private key) |
+| Website-only compromise, *replay an old signed manifest* | ~ accepted: authentic but stale; low-stakes for a grimoire, closable later with a signed monotonic version, no freeze needed |
+| Website + offline private key both compromised | ✗ (the key is the anchor; protect it) |
 
 ## Architecture
 

@@ -96,11 +96,15 @@ export class ManifestShapeError extends Error {
  * Fetch the raw manifest bytes (no JSON parse). Used so signature
  * verification operates on the exact bytes the server returned.
  */
-export async function fetchManifestBytes(url: string): Promise<Uint8Array> {
+export async function fetchManifestBytes(
+  url: string,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
   let res: Response;
   try {
     res = await fetch(url, {
       headers: { Accept: "application/json" },
+      signal,
     });
   } catch (cause) {
     throw new ManifestFetchError(url, cause);

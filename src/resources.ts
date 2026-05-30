@@ -59,10 +59,13 @@ export interface FetchedResource {
  * Fetch a resource by its manifest entry, verify SHA-256 + size, return
  * the content. Throws on any failure — never returns unverified content.
  */
-export async function fetchAndVerify(resource: Resource): Promise<FetchedResource> {
+export async function fetchAndVerify(
+  resource: Resource,
+  signal?: AbortSignal,
+): Promise<FetchedResource> {
   let res: Response;
   try {
-    res = await fetch(resource.uri);
+    res = await fetch(resource.uri, { signal });
   } catch (cause) {
     throw new ResourceFetchError(resource, cause);
   }

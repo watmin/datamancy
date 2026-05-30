@@ -42,10 +42,13 @@ export class SignatureInvalidError extends Error {
   }
 }
 
-export async function fetchSignature(url: string): Promise<Uint8Array> {
+export async function fetchSignature(
+  url: string,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
   let res: Response;
   try {
-    res = await fetch(url);
+    res = await fetch(url, { signal });
   } catch (cause) {
     throw new SignatureFetchError(url, cause);
   }

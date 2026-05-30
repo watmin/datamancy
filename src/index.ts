@@ -8,29 +8,36 @@
  * node:crypto for Ed25519 + SHA-256, node:readline for stdio framing,
  * global fetch for HTTP.
  *
- * Boot sequence (Tier 1 + Tier 2 active; Tier 3 planned):
- *   1. Fetch the manifest BYTES from datamancy.dev/.well-known/mcp/manifest.json
- *   2. Fetch the detached signature from manifest.json.sig
- *   3. Verify the signature against the pinned Ed25519 public key
- *      (src/pinned-pubkey.ts). Fail → exit immediately, content rejected.
- *   4. Parse the verified manifest bytes as JSON, shape-validate
- *   5. (T3 future) Verify the manifest SHA-256 against a hash pinned in
- *      the npm package source
- *   6. Expose each manifest resource as an MCP resource over stdio
- *   7. On resource read: fetch content, SHA-256 + size, verify against
- *      manifest entry. Mismatch → structured error, content NEVER returned.
+ * Trust model: LIVING. The pinned Ed25519 public key (src/pinned-pubkey.ts)
+ * is the only constant — it verifies ANY manifest the offline key signs,
+ * including ones that don't exist yet. So the website is the content: edit
+ * a spell, re-sign, push, and every consumer sees it next call. No manifest
+ * hash is pinned; there is no republish-per-spell.
+ *
+ * It's a static website, so this adapter is stateless: no boot snapshot, no
+ * reload verb. Every list/read fetches the manifest FRESH and verifies it,
+ * so content upgrades immediately. The grimoire index is itself a resource,
+ * so re-reading it yields the current catalog with no server involvement.
+ *
+ * Per request:
+ *   1. Fetch the manifest bytes + detached signature (live)
+ *   2. Verify the signature against the pinned public key — fail → reject
+ *   3. Parse + shape-validate the verified bytes
+ *   4. resources/list → the manifest's resources; resources/read → fetch
+ *      the content, verify SHA-256 + size against the manifest entry
+ *   5. On a transport failure, serve last-known-good from the verified memo
+ *      (loud log if the failure was a verification failure, not transport)
+ *
+ * Boot does one preflight fetch+verify to fail fast on misconfiguration and
+ * to seed the memo; it is NOT a cache — serving always re-fetches.
  */
 
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fetchManifestBytes, parseManifest } from "./manifest.js";
-import { fetchSignature, verifyManifestSignature } from "./signature.js";
-import { fetchAndVerify } from "./resources.js";
+import { Grimoire } from "./grimoire.js";
 import { createMcpServer, SUPPORTED_PROTOCOL_VERSION } from "./mcp.js";
-import { PINNED_MANIFEST_SHA256 } from "./pinned-manifest-hash.js";
 
 const MANIFEST_URL = "https://datamancy.dev/.well-known/mcp/manifest.json";
 const SIGNATURE_URL = "https://datamancy.dev/.well-known/mcp/manifest.json.sig";
@@ -62,81 +69,47 @@ function log(...args: unknown[]): void {
   console.error(`[${PACKAGE_NAME}]`, ...args);
 }
 
+const grimoire = new Grimoire(MANIFEST_URL, SIGNATURE_URL, log);
+
 async function main(): Promise<void> {
   log(`booting v${PACKAGE_VERSION}`);
   log(`manifest: ${MANIFEST_URL}`);
   log(`signature: ${SIGNATURE_URL}`);
 
-  const manifestBytes = await fetchManifestBytes(MANIFEST_URL);
-  log(`manifest fetched: ${manifestBytes.byteLength} bytes`);
-
-  // Tier 3: the pinned manifest hash is the strongest gate. Defeating it
-  // requires compromising the npm publish chain, not merely the website
-  // or the signing key. Check it FIRST: it short-circuits an unnecessary
-  // signature fetch, and on the common "manifest changed, package stale"
-  // case it yields an actionable npm-update message before any crypto runs.
-  const actualManifestHash = createHash("sha256")
-    .update(manifestBytes)
-    .digest("hex");
-  if (actualManifestHash !== PINNED_MANIFEST_SHA256) {
-    throw new Error(
-      `Manifest hash mismatch. Expected ${PINNED_MANIFEST_SHA256} ` +
-        `(pinned in this npm package), got ${actualManifestHash} ` +
-        `(from the live manifest). The manifest at datamancy.dev has ` +
-        `changed since this package version was published. Update to the ` +
-        `latest: \`npm update datamancy\` or \`npx -y datamancy@latest\`.`,
-    );
-  }
-  log(`manifest SHA-256 matches pinned value (tier 3)`);
-
-  const signatureBytes = await fetchSignature(SIGNATURE_URL);
-  log(`signature fetched: ${signatureBytes.byteLength} bytes`);
-
-  verifyManifestSignature(
-    manifestBytes,
-    signatureBytes,
-    MANIFEST_URL,
-    SIGNATURE_URL,
-  );
-  log(`signature VERIFIED against pinned public key`);
-
-  const manifest = parseManifest(manifestBytes, MANIFEST_URL);
+  // Preflight: fail fast if the live manifest is unreachable or its
+  // signature is invalid at launch. NOT a cache — serving re-fetches.
+  const manifest = await grimoire.preflight();
   log(
-    `manifest parsed: ${manifest.resources.length} resources, ` +
-      `trust=tier${manifest.trust.tier}, signed=${manifest.trust.signed}, ` +
-      `server=${manifest.serverInfo.name}@${manifest.serverInfo.version}`,
+    `preflight OK: ${manifest.resources.length} resources, signature ` +
+      `VERIFIED against pinned public key, server=` +
+      `${manifest.serverInfo.name}@${manifest.serverInfo.version}`,
   );
-
-  const byUri = new Map(manifest.resources.map((r) => [r.uri, r]));
 
   const server = createMcpServer({
     serverInfo: {
       name: PACKAGE_NAME,
       version: PACKAGE_VERSION,
     },
-    listResources: async () => ({
-      resources: manifest.resources.map((r) => ({
-        uri: r.uri,
-        name: r.name,
-        mimeType: r.mimeType,
-        description:
-          r.description ??
-          `Datamancy spell: ${r.name} (SHA-256 verified at fetch time).`,
-      })),
-    }),
+    listResources: async () => {
+      const resources = await grimoire.list();
+      return {
+        resources: resources.map((r) => ({
+          uri: r.uri,
+          name: r.name,
+          mimeType: r.mimeType,
+          description:
+            r.description ??
+            `Datamancy spell: ${r.name} (SHA-256 verified at fetch time).`,
+        })),
+      };
+    },
     readResource: async ({ uri }) => {
-      const resource = byUri.get(uri);
-      if (!resource) {
-        throw new Error(
-          `Unknown resource: ${uri}. Not present in the verified manifest.`,
-        );
-      }
-      const fetched = await fetchAndVerify(resource);
+      const fetched = await grimoire.read(uri);
       return {
         contents: [
           {
-            uri: resource.uri,
-            mimeType: resource.mimeType,
+            uri: fetched.resource.uri,
+            mimeType: fetched.resource.mimeType,
             text: fetched.text,
           },
         ],
@@ -144,7 +117,10 @@ async function main(): Promise<void> {
     },
   });
 
-  log(`listening on stdio (MCP ${SUPPORTED_PROTOCOL_VERSION})`);
+  log(
+    `listening on stdio (MCP ${SUPPORTED_PROTOCOL_VERSION}) — ` +
+      `manifest fetched fresh per request, content upgrades live`,
+  );
   await server.listen();
 }
 
