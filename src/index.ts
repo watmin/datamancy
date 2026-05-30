@@ -3,6 +3,11 @@
  * datamancy — a cryptographically verifiable static MCP server backed by
  * datamancy.dev.
  *
+ * Zero runtime dependencies. Every line of code in the trust-critical
+ * path lives in this repo. Node 20+ provides everything we need:
+ * node:crypto for Ed25519 + SHA-256, node:readline for stdio framing,
+ * global fetch for HTTP.
+ *
  * Boot sequence (Tier 1 + Tier 2 active; Tier 3 planned):
  *   1. Fetch the manifest BYTES from datamancy.dev/.well-known/mcp/manifest.json
  *   2. Fetch the detached signature from manifest.json.sig
@@ -10,23 +15,16 @@
  *      (src/pinned-pubkey.ts). Fail → exit immediately, content rejected.
  *   4. Parse the verified manifest bytes as JSON, shape-validate
  *   5. (T3 future) Verify the manifest SHA-256 against a hash pinned in
- *      the npm package source (defense-in-depth across the publish chain)
+ *      the npm package source
  *   6. Expose each manifest resource as an MCP resource over stdio
  *   7. On resource read: fetch content, SHA-256 + size, verify against
  *      manifest entry. Mismatch → structured error, content NEVER returned.
- *
- * Boots as a stdio MCP server, intended invocation: `npx -y datamancy`.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
 import { fetchManifestBytes, parseManifest } from "./manifest.js";
 import { fetchSignature, verifyManifestSignature } from "./signature.js";
 import { fetchAndVerify } from "./resources.js";
+import { createMcpServer, SUPPORTED_PROTOCOL_VERSION } from "./mcp.js";
 
 const MANIFEST_URL = "https://datamancy.dev/.well-known/mcp/manifest.json";
 const SIGNATURE_URL = "https://datamancy.dev/.well-known/mcp/manifest.json.sig";
@@ -44,15 +42,12 @@ async function main(): Promise<void> {
   log(`manifest: ${MANIFEST_URL}`);
   log(`signature: ${SIGNATURE_URL}`);
 
-  // Step 1: fetch raw manifest bytes
   const manifestBytes = await fetchManifestBytes(MANIFEST_URL);
   log(`manifest fetched: ${manifestBytes.byteLength} bytes`);
 
-  // Step 2: fetch detached signature
   const signatureBytes = await fetchSignature(SIGNATURE_URL);
   log(`signature fetched: ${signatureBytes.byteLength} bytes`);
 
-  // Step 3: verify signature against pinned pubkey (Tier 2)
   verifyManifestSignature(
     manifestBytes,
     signatureBytes,
@@ -61,7 +56,6 @@ async function main(): Promise<void> {
   );
   log(`signature VERIFIED against pinned public key`);
 
-  // Step 4: parse + shape-validate the now-trusted manifest
   const manifest = parseManifest(manifestBytes, MANIFEST_URL);
   log(
     `manifest parsed: ${manifest.resources.length} resources, ` +
@@ -73,20 +67,12 @@ async function main(): Promise<void> {
 
   const byUri = new Map(manifest.resources.map((r) => [r.uri, r]));
 
-  const server = new Server(
-    {
+  const server = createMcpServer({
+    serverInfo: {
       name: PACKAGE_NAME,
       version: PACKAGE_VERSION,
     },
-    {
-      capabilities: {
-        resources: {},
-      },
-    },
-  );
-
-  server.setRequestHandler(ListResourcesRequestSchema, async () => {
-    return {
+    listResources: async () => ({
       resources: manifest.resources.map((r) => ({
         uri: r.uri,
         name: r.name,
@@ -95,32 +81,29 @@ async function main(): Promise<void> {
           r.description ??
           `Datamancy spell: ${r.name} (SHA-256 verified at fetch time).`,
       })),
-    };
+    }),
+    readResource: async ({ uri }) => {
+      const resource = byUri.get(uri);
+      if (!resource) {
+        throw new Error(
+          `Unknown resource: ${uri}. Not present in the verified manifest.`,
+        );
+      }
+      const fetched = await fetchAndVerify(resource);
+      return {
+        contents: [
+          {
+            uri: resource.uri,
+            mimeType: resource.mimeType,
+            text: fetched.text,
+          },
+        ],
+      };
+    },
   });
 
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-    const uri = request.params.uri;
-    const resource = byUri.get(uri);
-    if (!resource) {
-      throw new Error(
-        `Unknown resource: ${uri}. Not present in the verified manifest.`,
-      );
-    }
-    const fetched = await fetchAndVerify(resource);
-    return {
-      contents: [
-        {
-          uri: resource.uri,
-          mimeType: resource.mimeType,
-          text: fetched.text,
-        },
-      ],
-    };
-  });
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  log("listening on stdio");
+  log(`listening on stdio (MCP ${SUPPORTED_PROTOCOL_VERSION})`);
+  await server.listen();
 }
 
 main().catch((err) => {
