@@ -20,6 +20,7 @@
 import { createPublicKey, verify, type KeyObject } from "node:crypto";
 import { PINNED_PUBKEY_PEM } from "./pinned-pubkey.js";
 import { DatamancyError } from "./errors.js";
+import { readCappedBody, BodyTooLargeError, MAX_SIGNATURE_BYTES } from "./http.js";
 
 const PUBKEY: KeyObject = createPublicKey({
   key: PINNED_PUBKEY_PEM,
@@ -59,9 +60,14 @@ export async function fetchSignature(
     throw new SignatureFetchError(url, `HTTP ${res.status}`);
   }
   try {
-    return new Uint8Array(await res.arrayBuffer());
+    // A detached P-256 DER signature is ~72 bytes; cap well above that so an
+    // oversized "signature" body can't OOM the process before verification.
+    return await readCappedBody(res, MAX_SIGNATURE_BYTES);
   } catch (cause) {
-    // A body-read failure (aborted/truncated stream) is still transport.
+    // Over-long or a body-read failure (aborted/truncated) are both transport.
+    if (cause instanceof BodyTooLargeError) {
+      throw new SignatureFetchError(url, cause.message);
+    }
     throw new SignatureFetchError(url, cause);
   }
 }

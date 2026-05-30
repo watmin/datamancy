@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import type { Resource } from "./manifest.js";
 import { DatamancyError } from "./errors.js";
+import { readCappedBody, BodyTooLargeError } from "./http.js";
 
 export class ResourceFetchError extends DatamancyError {
   readonly severity = "transport";
@@ -48,6 +49,17 @@ export class SizeMismatchError extends DatamancyError {
   }
 }
 
+export class EncodingError extends DatamancyError {
+  readonly severity = "verification";
+  constructor(public resource: Resource) {
+    super(
+      `Resource "${resource.name}" at ${resource.uri} is not valid UTF-8 text. ` +
+        `Datamancy spells are UTF-8 text only; refusing to ship a lossy ` +
+        `(replacement-char) decode of a binary body. Resource REJECTED.`,
+    );
+  }
+}
+
 export interface FetchedResource {
   resource: Resource;
   /** UTF-8 text content of the resource (post-verification). */
@@ -79,9 +91,16 @@ export async function fetchAndVerify(
 
   let bytes: Uint8Array;
   try {
-    bytes = new Uint8Array(await res.arrayBuffer());
+    // Cap the read at the manifest's declared size: a body longer than
+    // promised is a size mismatch, and capping means we never buffer an
+    // unbounded body into memory (OOM-proof against a compromised origin).
+    bytes = await readCappedBody(res, resource.size);
   } catch (cause) {
-    // A body-read failure (aborted/truncated stream) is still transport.
+    // Over-long body → a size mismatch (verification); any other read failure
+    // (aborted/truncated stream) is transport.
+    if (cause instanceof BodyTooLargeError) {
+      throw new SizeMismatchError(resource, resource.size, cause.read);
+    }
     throw new ResourceFetchError(resource, cause);
   }
 
@@ -94,6 +113,13 @@ export async function fetchAndVerify(
     throw new HashMismatchError(resource, resource.sha256, actualSha256);
   }
 
-  const text = Buffer.from(bytes).toString("utf-8");
+  // Strict UTF-8: a binary / non-UTF-8 body must fail LOUD, not be silently
+  // mangled into U+FFFD replacement chars and shipped to the LLM as if intact.
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new EncodingError(resource);
+  }
   return { resource, text };
 }

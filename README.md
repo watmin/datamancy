@@ -75,9 +75,11 @@ website is the content**: edit a spell, re-sign the manifest, push, and
 every consumer sees it on the next call. No manifest hash is baked into
 this package and there is no republish-per-spell.
 
-**Layer 1 — per-resource hashes.** The manifest lists a SHA-256 for every
-spell. Each fetched resource is hashed locally and compared; mismatch =
-the content is refused and a structured error reported.
+**Layer 1 — per-resource hashes.** The manifest lists a SHA-256 and byte
+size for every spell. Each fetched resource is read under a size cap (so a
+compromised origin can't exhaust memory), hashed locally and compared, and
+decoded as strict UTF-8; any mismatch — hash, size, or a non-text body — is
+refused and a structured error reported.
 
 **Layer 2 — signed manifest.** The manifest at
 `datamancy.dev/.well-known/mcp/manifest.json` is signed with an ECDSA
@@ -111,6 +113,17 @@ genuinely stuck fetch bails to last-known-good rather than hanging.
 | Full website compromise + replace everything | ✓ Layer 2 (attacker lacks the non-exportable KMS private key) |
 | Website-only compromise, *replay an old signed manifest* | ~ accepted by design: authentic but stale, low-stakes for a grimoire (a pinned consumer is immune — it froze a known-good hash) |
 | Website + KMS signing key both compromised | ✗ (the key is the anchor; it's non-exportable in KMS — protect the AWS account) |
+
+## Built to never change
+
+This package is designed to be **published once and never patched** — the
+pinned key is the only constant, and the website is the content. What the
+website may evolve freely versus what would require a new major is the
+**[forward-compatibility contract](CONTRACT.md)**, enforced by tests. A
+breaking format change is signalled by `schemaVersion`: a frozen client
+refuses a newer major *loud* ("upgrade the package") rather than misreading
+it. Crypto-agility and binary content are explicit end-of-life conditions,
+not in-place patches.
 
 ## Architecture
 

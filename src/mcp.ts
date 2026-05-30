@@ -3,11 +3,14 @@
  * framing in protocol.ts.
  *
  * Spec: https://modelcontextprotocol.io
- * Protocol version we negotiate: 2024-11-05 (a known stable version).
+ * Protocol version: we ECHO the client's requested version when it's one we
+ * can serve identically (SERVICEABLE_PROTOCOL_VERSIONS), else offer our
+ * default (2024-11-05). Both are spec-compliant; echoing keeps a future
+ * protocol bump from forcing a client disconnect on this frozen server.
  *
  * We expose only the `resources` capability — listing and reading. No
  * tools, no prompts, no sampling, no subscriptions. Datamancy spells are
- * static markdown, hash-verified at read time.
+ * static markdown, hash-verified (and UTF-8-checked) at read time.
  *
  * The full MCP spec includes many more methods; we ignore everything we
  * don't implement and the protocol layer returns MethodNotFound for any
@@ -18,8 +21,34 @@
 import { StdioServer } from "./protocol.js";
 import { BadParamsError } from "./errors.js";
 
-/** Protocol version we negotiate against clients. */
+/**
+ * Default protocol version — what we offer when the client's requested version
+ * isn't one we recognize (a spec-compliant "respond with a version we support").
+ */
 export const SUPPORTED_PROTOCOL_VERSION = "2024-11-05";
+
+/**
+ * Protocol versions this server can serve identically. We expose only the
+ * `resources` capability (list + read + listChanged), whose shape is unchanged
+ * across these MCP revisions — so when a client asks for any of them, we echo
+ * it back (per spec: "if the server supports the requested version it MUST
+ * respond with the same version"). This turns a future protocol bump from a
+ * forced client disconnect into a no-op, without the frozen kernel claiming
+ * behavior it doesn't implement.
+ */
+export const SERVICEABLE_PROTOCOL_VERSIONS: ReadonlySet<string> = new Set([
+  "2024-11-05",
+  "2025-03-26",
+  "2025-06-18",
+]);
+
+/** Echo the client's requested version when we can serve it; else our default. */
+export function negotiateProtocolVersion(requested: unknown): string {
+  return typeof requested === "string" &&
+    SERVICEABLE_PROTOCOL_VERSIONS.has(requested)
+    ? requested
+    : SUPPORTED_PROTOCOL_VERSION;
+}
 
 export interface ServerInfo {
   name: string;
@@ -78,13 +107,13 @@ export function createMcpServer(handlers: McpHandlers): StdioServer {
   const server = new StdioServer();
 
   server.onRequest("initialize", async (rawParams) => {
-    // We accept the client's protocol version request but always
-    // negotiate to OUR supported version in the response. Clients are
-    // expected to handle version mismatch by either accepting or
-    // disconnecting.
-    void rawParams; // input acknowledged; specific fields not used here
+    // Echo the client's requested protocol version when it's one we can serve
+    // identically (the resources capability is unchanged across them); else
+    // respond with our default. Both branches are spec-compliant.
+    const requested = (rawParams as { protocolVersion?: unknown } | null)
+      ?.protocolVersion;
     const result: InitializeResult = {
-      protocolVersion: SUPPORTED_PROTOCOL_VERSION,
+      protocolVersion: negotiateProtocolVersion(requested),
       capabilities: {
         resources: {
           subscribe: false,

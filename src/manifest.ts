@@ -12,6 +12,17 @@
  */
 
 import { DatamancyError } from "./errors.js";
+import { readCappedBody, BodyTooLargeError, MAX_MANIFEST_BYTES } from "./http.js";
+
+/**
+ * The manifest FORMAT major this kernel understands. `schemaVersion` is the
+ * publisher's break signal: additive changes (new fields) need no bump and
+ * are tolerated; a value GREATER than this means a breaking format the frozen
+ * kernel cannot safely interpret, so it refuses LOUD ("upgrade the package")
+ * rather than silently misreading a v2 manifest as v1. This is the one number
+ * that lets a never-patched client fail honestly instead of guessing.
+ */
+export const KERNEL_SCHEMA_MAJOR = 1;
 
 export interface Resource {
   /** Short identifier (e.g. "consonare", "intueri"). */
@@ -133,6 +144,25 @@ export class ManifestShapeError extends DatamancyError {
   }
 }
 
+export class ManifestSchemaError extends DatamancyError {
+  // A manifest from the future. Verification-class so a long-lived session
+  // serves last-known-good LOUD (and a cold boot fails fast) — either way the
+  // operator is told to upgrade rather than fed a guessed-at interpretation.
+  readonly severity = "verification";
+  constructor(
+    public url: string,
+    public declared: number,
+    public supported: number,
+  ) {
+    super(
+      `Manifest at ${url} declares schemaVersion ${declared}, but this ` +
+        `datamancy package understands format major ${supported}. This is a ` +
+        `newer manifest format — upgrade the datamancy package. Refusing to ` +
+        `guess at its meaning.`,
+    );
+  }
+}
+
 /**
  * Fetch the raw manifest bytes (no JSON parse). Used so signature
  * verification operates on the exact bytes the server returned.
@@ -154,8 +184,13 @@ export async function fetchManifestBytes(
     throw new ManifestFetchError(url, `HTTP ${res.status}`);
   }
   try {
-    return new Uint8Array(await res.arrayBuffer());
+    // Bounded read: a manifest larger than the ceiling can't OOM the process.
+    return await readCappedBody(res, MAX_MANIFEST_BYTES);
   } catch (cause) {
+    // Over-long or read failure are both transport (we haven't verified yet).
+    if (cause instanceof BodyTooLargeError) {
+      throw new ManifestFetchError(url, cause.message);
+    }
     throw new ManifestFetchError(url, cause);
   }
 }
@@ -175,6 +210,19 @@ export function parseManifest(bytes: Uint8Array, sourceUrl: string): Manifest {
   }
   if (!isManifest(data)) {
     throw new ManifestShapeError(sourceUrl);
+  }
+  // A schemaVersion newer than this frozen kernel understands is a breaking
+  // format we must not interpret. Refuse LOUD (verification-class) — never
+  // silently parse a future v2 as if it were v1.
+  if (
+    data.schemaVersion !== undefined &&
+    data.schemaVersion > KERNEL_SCHEMA_MAJOR
+  ) {
+    throw new ManifestSchemaError(
+      sourceUrl,
+      data.schemaVersion,
+      KERNEL_SCHEMA_MAJOR,
+    );
   }
   return data;
 }

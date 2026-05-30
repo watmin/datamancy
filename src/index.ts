@@ -72,6 +72,15 @@ function log(...args: unknown[]): void {
   console.error(`[${PACKAGE_NAME}]`, ...args);
 }
 
+// When the MCP client closes the stdio pipe, a pending stdout write surfaces
+// EPIPE as an async error event. With no listener that becomes an uncaught
+// exception — noise that looks like a crash. A disconnect is not a crash:
+// there's nothing left to serve, so exit cleanly.
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE") process.exit(0);
+  throw err;
+});
+
 // Consumer-chosen posture, all via env (zero-config by default):
 //   DATAMANCY_SITE    — origin to fetch from (default datamancy.dev)
 //   DATAMANCY_PIN     — sha256:<manifest-hash> → immutable hash-pin
