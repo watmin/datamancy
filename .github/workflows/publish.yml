@@ -3,13 +3,16 @@
 # short-lived OIDC identity both authorizes the publish AND signs the Sigstore
 # provenance attestation linking the tarball to this commit + workflow.
 #
-# One-time setup (the single web step the npm CLI can't do): on npmjs.com →
-# the `datamancy` package → Settings → Trusted Publishing → add a GitHub Actions
-# publisher: org `watmin`, repo `datamancy`, workflow `publish.yml`.
+# Flow: a `v*` tag release fires this. The `test` job runs first, ungated; only
+# if the suite is green does the `publish` job become reachable, and it pauses
+# in the `npm-publish` environment for your passkey-backed approval before it
+# touches the registry. So you approve AFTER seeing green, never blind.
 #
-# Then a release is: bump package.json, commit, `gh release create vX.Y.Z`.
+# One-time setup (done): npmjs.com → datamancy → Trusted Publishing → GitHub
+# Actions, repo watmin/datamancy, workflow publish.yml, environment npm-publish.
+#
 # The KMS manifest signing on datamancy.dev is a SEPARATE, deliberately-manual
-# trust act and never moves into CI.
+# trust act (also passkey-backed) and never moves into CI.
 name: publish
 
 on:
@@ -18,23 +21,31 @@ on:
 
 permissions:
   contents: read
-  id-token: write # grants the OIDC token used for auth + provenance
 
 jobs:
-  publish:
+  test:
     runs-on: ubuntu-latest
-    # Runs in the gated `npm-publish` environment: deployments restricted to v*
-    # tags + your passkey-backed review approval, and the OIDC token is stamped
-    # `environment:npm-publish` so npm only trusts this one channel.
-    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test # build + the full suite — the publish gate
+
+  publish:
+    needs: test # unreachable until the suite is green
+    runs-on: ubuntu-latest
+    environment: npm-publish # v*-tag-only + your passkey-backed approval
+    permissions:
+      contents: read
+      id-token: write # OIDC: tokenless auth + provenance signing
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      # Ensure an npm new enough for OIDC trusted publishing.
-      - run: npm install -g npm@latest
+      - run: npm install -g npm@latest # ensure OIDC-capable npm
       - run: npm ci
-      - run: npm test # gates the publish on the full suite (build + 103 tests)
       - run: npm publish --provenance --access public
