@@ -133,6 +133,15 @@ the design, not bugs:
   and warning-free at the `engines` floor (Node ≥ 20), verified through Node
   24.x. A far-future Node removing a stdlib API is outside any frozen artifact's
   control.
+- **Rollback protection is per-session, by design.** The kernel refuses a live
+  `latest` whose `epoch` regressed below the highest it verified *this process
+  lifetime* — so a long-lived session cannot be silently reverted. It does NOT
+  persist a high-water mark across restarts: a fresh process has no baseline and
+  accepts whatever `latest` it first verifies. Closing the cross-restart window
+  would require persisted local state (poisonable → a self-inflicted false-reject
+  class) or publisher heartbeat-signing (breaks "publish once, edit-on-change").
+  For a markdown grimoire neither trade is worth it; the in-session bound is
+  deliberate, not an oversight.
 
 ---
 
