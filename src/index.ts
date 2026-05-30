@@ -22,6 +22,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { fetchManifestBytes, parseManifest } from "./manifest.js";
 import { fetchSignature, verifyManifestSignature } from "./signature.js";
@@ -33,7 +36,26 @@ const MANIFEST_URL = "https://datamancy.dev/.well-known/mcp/manifest.json";
 const SIGNATURE_URL = "https://datamancy.dev/.well-known/mcp/manifest.json.sig";
 
 const PACKAGE_NAME = "datamancy";
-const PACKAGE_VERSION = "0.0.1";
+
+// Derive the version from package.json so the reported version can never
+// drift from the published one. npm always ships package.json in the
+// tarball regardless of the `files` field, and dist/index.js sits one
+// level below it, so `../package.json` resolves in every install.
+const PACKAGE_VERSION: string = (() => {
+  try {
+    const pkgPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "package.json",
+    );
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+      version?: string;
+    };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 
 function log(...args: unknown[]): void {
   // MCP uses stdout for protocol; logs go to stderr.
