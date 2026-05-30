@@ -1,6 +1,6 @@
 {
   "name": "datamancy",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Cryptographically verifiable static MCP server backed by datamancy.dev — every spell content is SHA-256 verified before any prompt reaches the LLM.",
   "type": "module",
   "main": "./dist/index.js",
