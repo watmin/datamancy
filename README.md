@@ -48,7 +48,7 @@ stronger posture entirely via env vars in the same config `"env": { … }`:
 | Env var | Effect |
 |---|---|
 | `DATAMANCY_PIN=sha256:<manifest-hash>` | Freeze to one immutable, audited version. Trusts nothing but the hash. |
-| `DATAMANCY_VERSION=<label>` | Freeze to a version by its ISO8601 label (resolved by walking the signed chain). |
+| `DATAMANCY_VERSION=<label>` | Freeze to a version by its ISO8601 label (resolved by walking the signed chain — the 100 most recent; pin older versions by exact hash). |
 | `DATAMANCY_SITE=<origin>` | Fetch from a self-hosted mirror — even raw git links. The pinned key still proves authenticity, so you host the bytes but can't forge them. |
 
 A version is the **whole grimoire frozen as one immutable snapshot** (like
@@ -57,7 +57,7 @@ what to pin, run the CLI:
 
 ```bash
 npx -y datamancy current     # the current version + the exact DATAMANCY_PIN line to copy
-npx -y datamancy versions    # every version, newest first (walks the signed chain)
+npx -y datamancy versions    # the 50 most recent, newest first (pin older by exact hash)
 ```
 
 Pinning + self-hosting compose: `DATAMANCY_SITE` + `DATAMANCY_PIN` gives a
@@ -130,7 +130,7 @@ Compute it yourself and compare (the `npm install` makes the package importable
 ```bash
 npm install datamancy
 node --input-type=module -e 'import{createPublicKey,createHash}from"node:crypto";\
-import{PINNED_PUBKEY_PEM}from"datamancy/dist/pinned-pubkey.js";\
+import{PINNED_PUBKEY_PEM}from"datamancy/pinned-pubkey";\
 console.log(createHash("sha256").update(createPublicKey({key:PINNED_PUBKEY_PEM,format:"pem"}).export({type:"spki",format:"der"})).digest("hex"))'
 ```
 

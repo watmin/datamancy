@@ -142,7 +142,19 @@ function isManifest(x: unknown): x is Manifest {
   // Chain/format fields are REQUIRED — no silent-assumption bypass. Every
   // manifest must DECLARE its format major, its chain position (null at
   // genesis), and its freshness stamp.
-  if (typeof m.schemaVersion !== "number") return false;
+  // schemaVersion is the break-signal — the one number the "frozen client fails
+  // honest on a future format" guarantee rests on. Harden it like `epoch`: a
+  // finite POSITIVE INTEGER, never NaN/0/negative/fractional. Critically,
+  // `NaN > 1` is false, so a bare `typeof number` check would let `NaN` slip
+  // BOTH this gate and the `> KERNEL_SCHEMA_MAJOR` break-signal — a silent
+  // misread in the exact mechanism built to prevent silent misreads.
+  if (
+    typeof m.schemaVersion !== "number" ||
+    !Number.isInteger(m.schemaVersion) ||
+    m.schemaVersion < 1
+  ) {
+    return false;
+  }
   // `previous` is a content-address — null at genesis, else `sha256:<hex64>`.
   // Gate it as strictly as `sha256` (not merely "string"), so a garbage
   // backpointer can't be interpolated into a fetch URL before the hash

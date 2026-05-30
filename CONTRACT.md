@@ -47,8 +47,13 @@ client keeps working.
 7. **Reorder resources.** Lookup is by name / uri, never by position.
 8. **Scale the catalog** — hundreds of spells, long descriptions, any
    `mimeType` string (it is never inspected; bodies are still UTF-8 text).
-9. **Publish an arbitrarily long version chain.** The walk is iterative and
-   each hop is hash-asserted; cycles are cryptographically impossible.
+9. **Publish a long version chain.** The walk is iterative and each hop is
+   hash-asserted; cycles are cryptographically impossible. *Label discovery is
+   bounded* — `versions` lists the 50 most recent and `DATAMANCY_VERSION`
+   resolves a label within the 100 most recent (a frozen client must not walk
+   unbounded history at boot) — but **any** version, however old, is always
+   reachable by exact hash pin (`DATAMANCY_PIN`), which fetches one immutable
+   snapshot directly.
 10. **Self-host.** Manifest paths are origin-relative; an org may clone a
     snapshot and serve it from its own host (`DATAMANCY_SITE`). The pinned key
     still proves the content — they host the bytes but cannot forge them.

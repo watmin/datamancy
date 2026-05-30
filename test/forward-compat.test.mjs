@@ -44,6 +44,21 @@ test("a schemaVersion EQUAL to the kernel major is accepted", () => {
   assert.equal(m.schemaVersion, KERNEL_SCHEMA_MAJOR);
 });
 
+test("a DEGENERATE schemaVersion (null / 0 / negative / fractional) is refused at the shape gate", () => {
+  // The break-signal must never silently misread. JSON can't carry NaN/Infinity
+  // (they serialize to null), but 0 and negatives ARE wire-representable and a
+  // bare `typeof number` check let them slip BOTH this gate and `> 1` (since
+  // 0 > 1 and -1 > 1 are false). Each must be a ManifestShapeError, never a
+  // silent accept and never a misclassified ManifestSchemaError.
+  for (const bad of [null, 0, -1, -5, 1.5, 2.5]) {
+    assert.throws(
+      () => parse(manifestFor([resourceFor("a", "x")], { schemaVersion: bad })),
+      ManifestShapeError,
+      `schemaVersion=${bad} must be refused at the shape gate`,
+    );
+  }
+});
+
 test("an absent schemaVersion is REJECTED — the format major must be declared", () => {
   const m = manifestFor([resourceFor("a", "x")]);
   delete m.schemaVersion;
