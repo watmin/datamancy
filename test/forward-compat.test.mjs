@@ -10,6 +10,7 @@ import {
   ManifestShapeError,
   KERNEL_SCHEMA_MAJOR,
 } from "../dist/manifest.js";
+import { MAX_RESOURCE_BYTES } from "../dist/http.js";
 import { bytesOf, manifestFor, resourceFor } from "./helpers.mjs";
 
 const URL_ = "https://datamancy.dev/.well-known/mcp/manifest.json";
@@ -86,6 +87,19 @@ test("an uppercase / non-hex sha256 is refused (case + charset frozen)", () => {
   const r = resourceFor("a", "x");
   r.sha256 = r.sha256.toUpperCase();
   assert.throws(() => parse(manifestFor([r])), ManifestShapeError);
+});
+
+test("a resource declaring a size past the memory ceiling is refused", () => {
+  const r = resourceFor("a", "x");
+  r.size = MAX_RESOURCE_BYTES + 1; // (sha256 won't match, but size is checked at shape time)
+  assert.throws(() => parse(manifestFor([r])), ManifestShapeError);
+});
+
+test("a resource at exactly the memory ceiling is structurally accepted", () => {
+  const r = resourceFor("a", "x");
+  r.size = MAX_RESOURCE_BYTES;
+  // Shape is valid; only the (separate) hash/size fetch check would later run.
+  assert.equal(parse(manifestFor([r])).resources[0].size, MAX_RESOURCE_BYTES);
 });
 
 test("changing trust.algorithm off SHA-256 is refused (crypto-agility = new major)", () => {

@@ -33,6 +33,16 @@ export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024; // 4 MiB
 export const MAX_SIGNATURE_BYTES = 16 * 1024; // 16 KiB
 
 /**
+ * A memory backstop on a resource's DECLARED size. Content reads are capped at
+ * `resource.size`, but that size comes from the manifest — so without a ceiling
+ * a manifest declaring `size: 8e9` (only possible with the signing key, but
+ * still) could drive an 8 GB buffer. A markdown spell is a few KB; 16 MiB is
+ * ~1700× the largest real spell, so this never bites legitimate content while
+ * guaranteeing EVERY memory path is bounded, at every trust level.
+ */
+export const MAX_RESOURCE_BYTES = 16 * 1024 * 1024; // 16 MiB
+
+/**
  * Read a fetch Response body, streaming, aborting if cumulative bytes exceed
  * `maxBytes`. Returns the exact bytes (≤ maxBytes). Throws BodyTooLargeError
  * on overflow (the stream is cancelled first, so nothing further is buffered);

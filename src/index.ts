@@ -38,7 +38,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Grimoire } from "./grimoire.js";
+import { createGrimoireHandlers } from "./handlers.js";
 import { createMcpServer, SUPPORTED_PROTOCOL_VERSION } from "./mcp.js";
+import type { StdioServer } from "./protocol.js";
 
 // The canonical origin. An org can override it (DATAMANCY_SITE) to serve a
 // cloned snapshot from its own host — the pinned public key still proves the
@@ -150,48 +152,16 @@ async function runServer(): Promise<void> {
     log(`to FREEZE this grimoire: DATAMANCY_PIN=sha256:${hash}`);
   }
 
-  const server = createMcpServer({
-    serverInfo: {
-      name: PACKAGE_NAME,
-      version: PACKAGE_VERSION,
-    },
-    listResources: async () => {
-      const resources = await grimoire.list();
-      return {
-        resources: resources.map((r) => ({
-          uri: r.uri,
-          name: r.name,
-          mimeType: r.mimeType,
-          description:
-            r.description ??
-            `Datamancy spell: ${r.name} (SHA-256 verified at fetch time).`,
-        })),
-      };
-    },
-    readResource: async ({ uri }) => {
-      const { fetched, setChange } = await grimoire.read(uri);
-      // If this cast revealed a spell-SET change since the client last listed,
-      // nudge it to re-source the grimoire — the notice lands at point of use.
-      // (Only ever non-null in live mode; a frozen pin never changes its set.)
-      if (setChange) {
-        log(
-          `update @ ${setChange.version}: spells added ` +
-            `[${setChange.added.join(", ") || "—"}], removed ` +
-            `[${setChange.removed.join(", ") || "—"}] — re-source the grimoire.`,
-        );
-        server.sendNotification("notifications/resources/list_changed");
-      }
-      return {
-        contents: [
-          {
-            uri: fetched.resource.uri,
-            mimeType: fetched.resource.mimeType,
-            text: fetched.text,
-          },
-        ],
-      };
-    },
-  });
+  // The notify thunk forwards to the server created just below; it's only
+  // invoked at request time, by which point `server` is assigned.
+  let server: StdioServer;
+  const handlers = createGrimoireHandlers(
+    grimoire,
+    { name: PACKAGE_NAME, version: PACKAGE_VERSION },
+    (method) => server.sendNotification(method),
+    log,
+  );
+  server = createMcpServer(handlers);
 
   log(
     `listening on stdio (MCP ${SUPPORTED_PROTOCOL_VERSION}) — ` +

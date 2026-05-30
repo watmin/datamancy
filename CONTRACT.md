@@ -74,6 +74,10 @@ rejection) — never a silent misread.
 5. **Spell bodies must be valid UTF-8 text.** A binary / non-UTF-8 body is
    refused loud (`EncodingError`), never shipped as mojibake. **No binary
    spells under v1.**
+5a. **Spell bodies must be ≤ 16 MiB** (`MAX_RESOURCE_BYTES`). This is a memory
+   backstop, not a content policy — a markdown spell is a few KB, so the ceiling
+   is ~1700× any real spell. A manifest declaring a larger `size` is refused.
+   It exists so *every* content read is bounded, at every trust level.
 6. **The paths and signature scheme are frozen.** Live manifest at
    `/.well-known/mcp/manifest.json`; snapshots at
    `/manifests/<hash>/manifest.json`; detached DER signature at

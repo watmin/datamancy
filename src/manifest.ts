@@ -12,7 +12,12 @@
  */
 
 import { DatamancyError } from "./errors.js";
-import { readCappedBody, BodyTooLargeError, MAX_MANIFEST_BYTES } from "./http.js";
+import {
+  readCappedBody,
+  BodyTooLargeError,
+  MAX_MANIFEST_BYTES,
+  MAX_RESOURCE_BYTES,
+} from "./http.js";
 
 /**
  * The manifest FORMAT major this kernel understands. `schemaVersion` is the
@@ -96,7 +101,10 @@ function isResource(x: unknown): x is Resource {
     HEX64.test(r.sha256) &&
     typeof r.size === "number" &&
     Number.isFinite(r.size) &&
-    r.size >= 0
+    r.size >= 0 &&
+    // Memory backstop: refuse a declared size beyond what any real spell needs,
+    // so a content read can never be asked to buffer an unbounded body.
+    r.size <= MAX_RESOURCE_BYTES
   );
 }
 
