@@ -1,0 +1,11 @@
+# Keep the SHA-pinned GitHub Actions fresh without hand-tracking commit SHAs:
+# Dependabot opens a PR (updating the SHA + its version comment) when a pinned
+# action releases an update. Scoped to github-actions ONLY — the kernel's npm
+# devDeps are deliberately left stable (this is a freeze-candidate; we don't
+# want auto-churn there).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
