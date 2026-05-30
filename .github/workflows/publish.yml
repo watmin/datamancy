@@ -23,6 +23,10 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Runs in the gated `npm-publish` environment: deployments restricted to v*
+    # tags + your passkey-backed review approval, and the OIDC token is stamped
+    # `environment:npm-publish` so npm only trusts this one channel.
+    environment: npm-publish
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
