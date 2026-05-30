@@ -1,16 +1,18 @@
 /**
- * Ed25519 signature verification for the datamancy.dev manifest.
+ * ECDSA P-256 signature verification for the datamancy.dev manifest.
  *
- * The manifest at datamancy.dev/.well-known/mcp/manifest.json is signed
- * by the maintainer's offline private key. The detached signature lives
- * at datamancy.dev/.well-known/mcp/manifest.json.sig. This module fetches
- * the signature and verifies it against the pinned public key.
+ * The manifest at datamancy.dev/.well-known/mcp/manifest.json is signed by
+ * a key held in AWS KMS (non-exportable; signing happens inside the HSM).
+ * The detached DER signature lives at manifest.json.sig. This module fetches
+ * it and verifies it against the pinned public key.
  *
  * Verification flow:
  *   1. Fetch the raw manifest bytes (not parsed JSON yet — we verify the
  *      exact bytes the server returned, before any transformation)
- *   2. Fetch the raw signature bytes
- *   3. node:crypto verify(null, manifestBytes, PUBKEY, signatureBytes)
+ *   2. Fetch the raw signature bytes (DER-encoded ECDSA)
+ *   3. verify("sha256", manifestBytes, {key, dsaEncoding:"der"}, sig) —
+ *      node hashes the bytes with SHA-256 and verifies the P-256 signature,
+ *      reproducing the digest KMS signed under ECDSA_SHA_256
  *   4. Pass → proceed to JSON parse + use
  *   5. Fail → reject; signal MUST NOT reach the LLM
  */
@@ -69,8 +71,15 @@ export function verifyManifestSignature(
   manifestUrl: string,
   signatureUrl: string,
 ): void {
-  // Ed25519: algorithm arg is null; node:crypto infers from key type.
-  const ok = verify(null, manifestBytes, PUBKEY, signatureBytes);
+  // ECDSA P-256 over SHA-256. dsaEncoding "der" matches KMS's output (an
+  // ASN.1 SEQUENCE of r,s); node hashes manifestBytes with SHA-256 to
+  // reproduce the digest KMS signed under ECDSA_SHA_256.
+  const ok = verify(
+    "sha256",
+    manifestBytes,
+    { key: PUBKEY, dsaEncoding: "der" },
+    signatureBytes,
+  );
   if (!ok) {
     throw new SignatureInvalidError(manifestUrl, signatureUrl);
   }
