@@ -95,7 +95,10 @@ export function createMcpServer(handlers: McpHandlers): StdioServer {
       capabilities: {
         resources: {
           subscribe: false,
-          listChanged: false,
+          // Live mode polls for spell-SET changes and emits
+          // notifications/resources/list_changed so a long-lived session is
+          // nudged to re-source the grimoire when a spell is added/removed.
+          listChanged: true,
         },
       },
       serverInfo: handlers.serverInfo,

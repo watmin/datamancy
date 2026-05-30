@@ -111,6 +111,12 @@ export class Grimoire {
   private baselineMs: number | null = null;
   /** SHA-256 of the most recently loaded manifest — the current version id. */
   loadedHash: string | null = null;
+  /** Sorted spell-name set last seen — detects spell add/remove (live mode). */
+  private knownSpellSet: string | null = null;
+  /** Set-change detected on the most recent cast, for the handler to surface
+   * as a list_changed nudge. Consumed (nulled) after it's reported. */
+  lastSetChange: { version: string; added: string[]; removed: string[] } | null =
+    null;
 
   constructor(
     config: GrimoireConfig,
@@ -217,6 +223,7 @@ export class Grimoire {
   /** Current resource list, with uris resolved to the configured origin. */
   async list(): Promise<Resource[]> {
     const manifest = await this.loadManifest();
+    this.syncSpellSet(manifest, false); // the client now sees the current set
     return manifest.resources.map((r) => ({ ...r, uri: this.resolve(r.uri) }));
   }
 
@@ -227,6 +234,7 @@ export class Grimoire {
    */
   async read(uri: string): Promise<FetchedResource> {
     const manifest = await this.loadManifest();
+    this.syncSpellSet(manifest, true); // cast time: detect spell add/remove
     // The client passes the resolved (absolute) uri we exposed in list().
     const resource = manifest.resources.find(
       (r) => this.resolve(r.uri) === uri,
@@ -268,6 +276,7 @@ export class Grimoire {
     const t0 = Date.now();
     const manifest = await this.loadManifest();
     this.baselineMs = Date.now() - t0;
+    this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
     if (this.mode === "live") {
       this.log(
         `baseline latency ${this.baselineMs}ms → warm fetch bound ` +
@@ -302,6 +311,46 @@ export class Grimoire {
       epoch: m.epoch,
       resources: m.resources.length,
     };
+  }
+
+  private static spellSetKey(resources: Resource[]): string {
+    return resources
+      .map((r) => r.name)
+      .sort()
+      .join("\n");
+  }
+
+  /** Pure: the spell-set change from a previous key to a manifest, or null if
+   *  unchanged (or no prior baseline). Content edits don't change the set. */
+  static spellSetDiff(
+    prevKey: string | null,
+    manifest: Manifest,
+  ): { version: string; added: string[]; removed: string[] } | null {
+    const names = manifest.resources.map((r) => r.name);
+    const key = Grimoire.spellSetKey(manifest.resources);
+    if (prevKey === null || prevKey === key) return null;
+    const prevSet = new Set(prevKey.split("\n"));
+    const curSet = new Set(names);
+    return {
+      version: manifest.serverInfo.version,
+      added: names.filter((n) => !prevSet.has(n)),
+      removed: [...prevSet].filter((n) => !curSet.has(n)),
+    };
+  }
+
+  /**
+   * Reconcile the known spell set with a just-loaded manifest. On a cast
+   * (read), if the SET changed (a spell added/removed since the client last
+   * saw the list), stash it so the server can nudge the client to re-source
+   * the grimoire — the notice lands when they try to use it. Content edits
+   * (same names, new bytes) are NOT a set change; served fresh on the cast.
+   */
+  private syncSpellSet(manifest: Manifest, reportOnCast: boolean): void {
+    if (reportOnCast) {
+      const diff = Grimoire.spellSetDiff(this.knownSpellSet, manifest);
+      if (diff) this.lastSetChange = diff;
+    }
+    this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
   }
 
   /** The current (latest) version. */

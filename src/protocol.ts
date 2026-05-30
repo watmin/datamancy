@@ -76,6 +76,13 @@ export class StdioServer {
     this.notificationHandlers.set(method, handler);
   }
 
+  /** Server-initiated notification (no id, no response expected). */
+  sendNotification(method: string, params?: unknown): void {
+    this.out.write(
+      JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }) + "\n",
+    );
+  }
+
   /**
    * Begin reading from stdin (or supplied stream). Resolves only when the
    * input stream closes. Errors during message handling are logged to
