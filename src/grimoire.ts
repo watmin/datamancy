@@ -21,11 +21,12 @@
  * (LOUD — a tamper is never silent); the bad bytes are never remembered.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, type KeyObject } from "node:crypto";
 
 import {
   fetchManifestBytes,
   parseManifest,
+  HEX64,
   type Manifest,
   type Resource,
 } from "./manifest.js";
@@ -51,8 +52,6 @@ export interface SpellRead {
   setChange: SpellSetChange | null;
 }
 
-const HEX64 = /^[0-9a-f]{64}$/;
-
 // Timeout policy. Cold start (no fallback) gets a generous budget; once a
 // verified memo exists, a fetch is bounded so a genuinely STUCK one bails to
 // last-known-good. A FIXED, generous bound — not a per-fetch guess derived
@@ -68,6 +67,12 @@ export interface GrimoireConfig {
   pinHash?: string | null;
   /** DATAMANCY_VERSION — a friendly version (serverInfo.version / ISO8601). */
   version?: string | null;
+  /**
+   * Override the manifest-verification key. Defaults to the pinned production
+   * key; only tests pass this (with a throwaway keypair) to exercise the
+   * trust gate hermetically — the real KMS key is non-exportable.
+   */
+  verifyKey?: KeyObject;
 }
 
 export interface VersionInfo {
@@ -92,6 +97,8 @@ export class Grimoire {
   /** Resolved manifest hash for pinned mode (from pinHash or version walk). */
   private pinHash: string | null;
   private readonly version: string | null;
+  /** Verification key (default pinned; tests override — see GrimoireConfig). */
+  private readonly verifyKey?: KeyObject;
 
   /** Last verified-good manifest (with its hash) — last-known-good fallback. */
   private manifestMemo: VerifiedManifest | null = null;
@@ -107,6 +114,7 @@ export class Grimoire {
   ) {
     this.site = config.site.replace(/\/+$/, "");
     this.version = config.version ?? null;
+    this.verifyKey = config.verifyKey;
     if (config.pinHash) {
       if (!HEX64.test(config.pinHash)) {
         throw new BadPinError(config.pinHash);
@@ -266,7 +274,7 @@ export class Grimoire {
       fetchManifestBytes(url, signal),
       fetchSignature(sigUrl, signal),
     ]);
-    verifyManifestSignature(bytes, sig, url, sigUrl);
+    verifyManifestSignature(bytes, sig, url, sigUrl, this.verifyKey);
     const hash = createHash("sha256").update(bytes).digest("hex");
     if (expectHash && hash !== expectHash) {
       throw new PinMismatchError(expectHash, hash, url);

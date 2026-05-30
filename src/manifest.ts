@@ -57,15 +57,29 @@ export interface Manifest {
   resources: Resource[];
 }
 
-const HEX64 = /^[0-9a-f]{64}$/;
+/** A lowercase hex SHA-256 (64 chars). Shared so pin + hash checks agree. */
+export const HEX64 = /^[0-9a-f]{64}$/;
+
+/** True iff `path` is a string that resolves as a URL (absolute or relative).
+ *  Validating here means a malformed uri/blob fails the shape check (a
+ *  verification-class ManifestShapeError) before resolve() ever sees it. */
+function resolves(path: unknown): path is string {
+  if (typeof path !== "string") return false;
+  try {
+    new URL(path, "https://x/");
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function isResource(x: unknown): x is Resource {
   if (typeof x !== "object" || x === null) return false;
   const r = x as Record<string, unknown>;
   return (
     typeof r.name === "string" &&
-    typeof r.uri === "string" &&
-    (r.blob === undefined || typeof r.blob === "string") &&
+    resolves(r.uri) &&
+    (r.blob === undefined || resolves(r.blob)) &&
     typeof r.mimeType === "string" &&
     typeof r.sha256 === "string" &&
     HEX64.test(r.sha256) &&

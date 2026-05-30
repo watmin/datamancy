@@ -163,8 +163,8 @@ async function runServer(): Promise<void> {
       const { fetched, setChange } = await grimoire.read(uri);
       // If this cast revealed a spell-SET change since the client last listed,
       // nudge it to re-source the grimoire — the notice lands at point of use.
-      // (Live mode only; a frozen pin never changes its set.)
-      if (setChange && !pinHash && !version) {
+      // (Only ever non-null in live mode; a frozen pin never changes its set.)
+      if (setChange) {
         log(
           `update @ ${setChange.version}: spells added ` +
             `[${setChange.added.join(", ") || "—"}], removed ` +

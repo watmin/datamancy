@@ -108,7 +108,7 @@ genuinely stuck fetch bails to last-known-good rather than hanging.
 |---|---|
 | Tamper one spell file | ✓ Layer 1 (hash mismatch on fetch) |
 | Tamper manifest + spell files together | ✓ Layer 2 (signature invalid) |
-| Full website compromise + replace everything | ✓ Layer 2 (attacker lacks the offline private key) |
+| Full website compromise + replace everything | ✓ Layer 2 (attacker lacks the non-exportable KMS private key) |
 | Website-only compromise, *replay an old signed manifest* | ~ accepted by design: authentic but stale, low-stakes for a grimoire (a pinned consumer is immune — it froze a known-good hash) |
 | Website + KMS signing key both compromised | ✗ (the key is the anchor; it's non-exportable in KMS — protect the AWS account) |
 
