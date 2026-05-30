@@ -16,7 +16,8 @@
     "build": "tsc",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build",
-    "test": "node --test dist/**/*.test.js"
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {},
   "devDependencies": {

@@ -70,6 +70,9 @@ export function verifyManifestSignature(
   signatureBytes: Uint8Array,
   manifestUrl: string,
   signatureUrl: string,
+  // Defaults to the pinned key; overridable only so tests can verify against
+  // a throwaway keypair. Production never passes this.
+  pubkey: KeyObject = PUBKEY,
 ): void {
   // ECDSA P-256 over SHA-256. dsaEncoding "der" matches KMS's output (an
   // ASN.1 SEQUENCE of r,s); node hashes manifestBytes with SHA-256 to
@@ -77,7 +80,7 @@ export function verifyManifestSignature(
   const ok = verify(
     "sha256",
     manifestBytes,
-    { key: PUBKEY, dsaEncoding: "der" },
+    { key: pubkey, dsaEncoding: "der" },
     signatureBytes,
   );
   if (!ok) {

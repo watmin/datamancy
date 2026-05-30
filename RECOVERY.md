@@ -60,40 +60,39 @@ git push                            # Cloudflare redeploys the known-good manife
 Pinned consumers were never exposed (they froze a good hash and never follow
 latest). This step protects the *live* consumers.
 
-## Step 3 — Rotate to a new key (the real recovery)
+## Step 3 — Remediate the account, then resume with the SAME key
 
-The pinned pubkey can't be rotated in place, so recovery is a new key + a new
-package version. `@latest` consumers heal automatically on next run.
+This is the part that matters, and where the KMS model diverges sharply from a
+stolen key-file. **The key material was never exposed** — KMS keys are
+non-exportable, so the attacker never held the secret, only the temporary
+*permission* to call `kms:Sign`. Take that permission away and the key is
+trustworthy again. Fix the account, not the key:
+
+- Rotate the compromised AWS credentials / kill the bad SSO sessions.
+- Close the hole they came through (IAM misconfig, leaked IdP creds, etc.).
+- Audit CloudTrail for everything they did during the window.
+
+Then re-enable the key and resume signing — **no new key, no re-pin, no package
+republish, no consumer action:**
 
 ```bash
-# new KMS key (admin session)
-aws kms create-key --key-spec ECC_NIST_P256 --key-usage SIGN_VERIFY \
-  --description "datamancy manifest signing key (rotated <date>)" \
+aws kms enable-key --key-id alias/datamancy-signing \
   --region us-west-2 --profile <admin-profile>
-aws kms create-alias --alias-name alias/datamancy-signing-v2 \
-  --target-key-id <new-KeyId> --region us-west-2 --profile <admin-profile>
-# re-scope the DatamancySigner permission set's inline policy to the new key ARN
-
-# pin the new pubkey
-aws kms get-public-key --key-id alias/datamancy-signing-v2 ... | base64 -d \
-  | openssl pkey -pubin -inform DER -out datamancy/datamancy-kms-pub.pem
-#  → paste into datamancy/src/pinned-pubkey.ts
-
-# re-sign the live manifest with the new key, push datamancy.dev
-# bump + publish the npm package (new pinned pubkey) — `@latest` consumers heal
+# then regenerate + sign the manifest as normal and push
 ```
 
-Then **schedule deletion** of the compromised key once you're confident:
-```bash
-aws kms schedule-key-deletion --key-id alias/datamancy-signing \
-  --pending-window-in-days 7 --region us-west-2 --profile <admin-profile>
-```
+The pinned pubkey is unchanged, so every consumer keeps working. Recovery
+stays entirely inside your AWS account + the channel.
 
-## Step 4 — Tell people out-of-band
+## When to actually rotate the key (rarely)
 
-Anyone pinned to a *post-compromise* version, or on a self-hosted mirror,
-won't heal via `@latest`. Announce the rotation (GitHub release notes,
-datamancer.dev) so pinned/mirrored consumers re-pin a clean hash.
+Rotation — new key, re-pin `src/pinned-pubkey.ts`, publish a new npm version,
+announce so pinned/mirrored consumers re-pin — is warranted **only** if you have
+positive reason to distrust the **key material itself**. With a non-exportable
+KMS key that essentially means "AWS notified me the HSM was compromised," which
+is not a realistic event. Do NOT rotate reflexively after an account
+compromise — that treats the wrong layer. Fix the access; keep the key. Rotate
+only on evidence the *key*, not the *access*, is bad.
 
 ## Why no revocation system
 
