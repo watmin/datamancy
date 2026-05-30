@@ -1,27 +1,27 @@
 /**
- * The live grimoire: a stateless verifying pass-through to datamancy.dev.
+ * The grimoire: a verifying client to datamancy.dev, in one of two postures
+ * the CONSUMER chooses — not the publisher.
  *
- * It's a static website, so this adapter holds no boot snapshot and needs
- * no reload verb. Every list/read fetches the manifest FRESH and verifies
- * it against the pinned public key, so content upgrades the instant the
- * website does. The only "reload" is the client re-reading a resource —
- * and since the grimoire index is itself a resource, re-reading it yields
- * the current catalog with no server involvement.
+ *   LIVE (default)      — follow the moving `latest` pointer. Stateless
+ *                         always-fetch; content upgrades the instant the
+ *                         website does. Fetches each spell's pretty `uri`.
+ *   PINNED              — freeze to one audited immutable version. Set
+ *                         DATAMANCY_PIN=sha256:<manifest-hash> (strongest:
+ *                         trusts nothing but the hash) or DATAMANCY_VERSION=
+ *                         <gitsha> (resolved by walking the signed chain).
+ *                         Fetches each spell's immutable `blob`. Loaded once,
+ *                         then frozen — it can never change by construction.
  *
- * The one stateful concession is the memo: a write-only-on-verified cache
- * that lets a transient network failure serve last-known-good instead of
- * blanking. The rule is absolute — only verified content is ever
- * remembered, so the memo can never hold anything forged. RAM is inside
- * the trust boundary (an attacker who can rewrite it already owns the
- * pinned pubkey beside it), so memoized content is served directly, never
- * re-verified.
+ * Trust in both modes: every manifest is Ed25519/P-256 verified against the
+ * pinned public key; every spell body is SHA-256 verified before release.
+ * Pinned mode adds: the manifest's own bytes must hash to the pinned value.
  *
- * Failure handling distinguishes by SIGNAL, not behavior:
- *   - transport failure (timeout/DNS/5xx)      → serve last-good, INFO log
- *   - verification failure (bad sig/hash/size) → serve last-good, LOUD log
- *     ("a scary event just happened") — a tamper must never be silent
- *   - no memo yet                              → refuse (cold start)
+ * Resilience (live mode): a write-only-on-verified memo serves last-known-good
+ * on a transient transport failure (quiet) and on a verification failure
+ * (LOUD — a tamper is never silent); the bad bytes are never remembered.
  */
+
+import { createHash } from "node:crypto";
 
 import {
   fetchManifestBytes,
@@ -41,61 +41,157 @@ import {
   type FetchedResource,
 } from "./resources.js";
 
-/**
- * A verification failure means "got bytes, and they're wrong" — a tamper
- * signal. A transport failure means "couldn't get the bytes." Only the
- * former is loud; both fall back to last-known-good.
- */
+/** A pinned manifest whose bytes don't hash to the requested pin. */
+export class PinMismatchError extends Error {
+  constructor(
+    public expected: string,
+    public actual: string,
+    public url: string,
+  ) {
+    super(
+      `Pin mismatch at ${url}: expected sha256:${expected}, got ` +
+        `sha256:${actual}. The bytes served for this pinned version do not ` +
+        `match the requested hash — REFUSING.`,
+    );
+    this.name = "PinMismatchError";
+  }
+}
+
+/** "Got bytes, and they're wrong" — loud. Distinct from transport failure. */
 function isVerificationFailure(err: unknown): boolean {
   return (
     err instanceof SignatureInvalidError ||
     err instanceof HashMismatchError ||
-    err instanceof SizeMismatchError
+    err instanceof SizeMismatchError ||
+    err instanceof PinMismatchError
   );
 }
 
-// Timeout policy. Cold start (no memo) must succeed, so it gets a generous
-// budget. Once we hold a verified memo, fetches are bounded TIGHT — there's
-// a safe fallback, so there's no reason to wait long for fresh. The warm
-// bound is adaptive: ~3x the measured baseline latency (so it auto-tunes to
-// the consumer's network), clamped to a floor (a pure 3x of a fast baseline
-// would trip on normal jitter) and a ceiling (we have last-known-good; never
-// hang). Past the bound, the fetch aborts → transport failure → serve memo.
+const HEX64 = /^[0-9a-f]{64}$/;
+
+// Timeout policy (live mode). Cold start gets a generous budget; once a
+// verified memo exists, warm fetches are bounded ~3x the measured baseline
+// (clamped) so a degraded network bails to last-known-good fast.
 const COLD_TIMEOUT_MS = 15_000;
 const WARM_MULTIPLIER = 3;
 const WARM_FLOOR_MS = 750;
 const WARM_CEIL_MS = 5_000;
 
+export interface GrimoireConfig {
+  /** Origin, e.g. "https://datamancy.dev". */
+  site: string;
+  /** DATAMANCY_PIN — a manifest SHA-256 (bare hex, "sha256:" stripped). */
+  pinHash?: string | null;
+  /** DATAMANCY_VERSION — a friendly version (serverInfo.version / gitsha). */
+  version?: string | null;
+}
+
 export class Grimoire {
+  private readonly site: string;
+  private readonly mode: "live" | "pinned";
+  /** Resolved manifest hash for pinned mode (from pinHash or version walk). */
+  private pinHash: string | null;
+  private readonly version: string | null;
+
   private manifestMemo: Manifest | null = null;
+  /** Pinned content is immutable, so it loads exactly once and freezes. */
+  private frozenManifest: Manifest | null = null;
   private contentMemo = new Map<string, FetchedResource>();
   private baselineMs: number | null = null;
 
   constructor(
-    private readonly manifestUrl: string,
-    private readonly signatureUrl: string,
+    config: GrimoireConfig,
     private readonly log: (...args: unknown[]) => void,
-  ) {}
+  ) {
+    this.site = config.site.replace(/\/+$/, "");
+    this.version = config.version ?? null;
+    if (config.pinHash) {
+      if (!HEX64.test(config.pinHash)) {
+        throw new Error(
+          `DATAMANCY_PIN must be a 64-char hex SHA-256 (optionally ` +
+            `"sha256:"-prefixed); got "${config.pinHash}".`,
+        );
+      }
+      this.mode = "pinned";
+      this.pinHash = config.pinHash;
+    } else if (config.version) {
+      this.mode = "pinned";
+      this.pinHash = null; // resolved at preflight via chain walk
+    } else {
+      this.mode = "live";
+      this.pinHash = null;
+    }
+  }
+
+  /** Human-readable description of the active posture (for boot logs). */
+  describe(): string {
+    if (this.mode === "live") return "LIVE (following latest)";
+    if (this.pinHash) return `PINNED sha256:${this.pinHash}`;
+    return `PINNED version:${this.version} (resolving)`;
+  }
+
+  private liveManifestUrl(): string {
+    return `${this.site}/.well-known/mcp/manifest.json`;
+  }
+
+  private snapshotManifestUrl(hash: string): string {
+    return `${this.site}/manifests/${hash}/manifest.json`;
+  }
 
   /**
-   * Fetch + verify the live manifest. On success, refresh the memo and
-   * return it. On failure, fall back to last-known-good if present (loud
-   * on verification failure), else rethrow — a cold start with no good
-   * manifest cannot be faked into trust.
+   * Resolve a manifest path against the configured origin. Manifests carry
+   * origin-agnostic paths (e.g. "/blobs/sha256/<hash>"), so an org can clone
+   * a snapshot and serve it from its own host by setting DATAMANCY_SITE —
+   * the bytes are verified by signature + hash, never by where they live.
+   * (An absolute URL passed here is returned unchanged.)
+   */
+  private resolve(pathOrUrl: string): string {
+    return new URL(pathOrUrl, `${this.site}/`).toString();
+  }
+
+  /** Cold (no fallback) gets a generous budget; warm is bounded tight. */
+  private timeoutFor(haveMemo: boolean): number {
+    if (!haveMemo) return COLD_TIMEOUT_MS;
+    const adaptive = WARM_MULTIPLIER * (this.baselineMs ?? WARM_CEIL_MS);
+    return Math.min(Math.max(adaptive, WARM_FLOOR_MS), WARM_CEIL_MS);
+  }
+
+  /**
+   * Load the manifest for the active posture. Live: fetch the moving latest,
+   * fresh each call, memo fallback. Pinned: fetch the immutable snapshot
+   * once, assert its hash equals the pin, then freeze it.
    */
   private async loadManifest(): Promise<Manifest> {
-    // Warm if we already hold a verified manifest to fall back to.
-    const signal = AbortSignal.timeout(this.timeoutFor(this.manifestMemo !== null));
+    if (this.mode === "pinned" && this.frozenManifest) {
+      return this.frozenManifest; // immutable — loaded once, never re-fetched
+    }
+
+    const url =
+      this.mode === "pinned"
+        ? this.snapshotManifestUrl(this.pinHash as string)
+        : this.liveManifestUrl();
+    const sigUrl = `${url}.sig`;
+    const signal = AbortSignal.timeout(
+      this.timeoutFor(this.manifestMemo !== null),
+    );
+
     try {
-      // Manifest and signature are independent — fetch them concurrently so
-      // a load costs one round trip, not two.
       const [bytes, sig] = await Promise.all([
-        fetchManifestBytes(this.manifestUrl, signal),
-        fetchSignature(this.signatureUrl, signal),
+        fetchManifestBytes(url, signal),
+        fetchSignature(sigUrl, signal),
       ]);
-      verifyManifestSignature(bytes, sig, this.manifestUrl, this.signatureUrl);
-      const manifest = parseManifest(bytes, this.manifestUrl);
+      verifyManifestSignature(bytes, sig, url, sigUrl);
+
+      if (this.mode === "pinned") {
+        const actual = createHash("sha256").update(bytes).digest("hex");
+        if (actual !== this.pinHash) {
+          throw new PinMismatchError(this.pinHash as string, actual, url);
+        }
+      }
+
+      const manifest = parseManifest(bytes, url);
       this.manifestMemo = manifest; // remember ONLY verified-good
+      if (this.mode === "pinned") this.frozenManifest = manifest; // freeze
       return manifest;
     } catch (err) {
       if (this.manifestMemo) {
@@ -106,35 +202,36 @@ export class Grimoire {
     }
   }
 
-  /** Cold (no fallback) gets a generous budget; warm is bounded tight. */
-  private timeoutFor(haveMemo: boolean): number {
-    if (!haveMemo) return COLD_TIMEOUT_MS;
-    const adaptive = WARM_MULTIPLIER * (this.baselineMs ?? WARM_CEIL_MS);
-    return Math.min(Math.max(adaptive, WARM_FLOOR_MS), WARM_CEIL_MS);
-  }
-
-  /** Current resource list, fetched fresh. */
+  /** Current resource list, with uris resolved to the configured origin. */
   async list(): Promise<Resource[]> {
     const manifest = await this.loadManifest();
-    return manifest.resources;
+    return manifest.resources.map((r) => ({ ...r, uri: this.resolve(r.uri) }));
   }
 
   /**
-   * Read one resource by URI. Fetches the live manifest (for the current
-   * expected hash), then fetches + verifies the content. Memo fallback on
-   * failure, by the same rules as the manifest.
+   * Read one resource by its (pretty) URI. Live mode fetches that live `uri`;
+   * pinned mode fetches the immutable `blob`. Either way the content is
+   * SHA-256 + size verified against the manifest entry.
    */
   async read(uri: string): Promise<FetchedResource> {
     const manifest = await this.loadManifest();
-    const resource = manifest.resources.find((r) => r.uri === uri);
+    // The client passes the resolved (absolute) uri we exposed in list().
+    const resource = manifest.resources.find(
+      (r) => this.resolve(r.uri) === uri,
+    );
     if (!resource) {
       throw new Error(
         `Unknown resource: ${uri}. Not present in the verified manifest.`,
       );
     }
-    const signal = AbortSignal.timeout(this.timeoutFor(this.contentMemo.has(uri)));
+    const path =
+      this.mode === "pinned" ? (resource.blob ?? resource.uri) : resource.uri;
+    const fetchUrl = this.resolve(path);
+    const signal = AbortSignal.timeout(
+      this.timeoutFor(this.contentMemo.has(uri)),
+    );
     try {
-      const fetched = await fetchAndVerify(resource, signal);
+      const fetched = await fetchAndVerify(resource, signal, fetchUrl);
       this.contentMemo.set(uri, fetched); // remember ONLY verified-good
       return fetched;
     } catch (err) {
@@ -148,19 +245,56 @@ export class Grimoire {
   }
 
   /**
-   * Startup self-test: fail fast if the live manifest is unreachable or
-   * its signature is invalid at launch. Seeds the manifest memo so a
-   * network blip immediately after boot still has a fallback.
+   * Startup: resolve a version pin to a hash (if needed), then load the
+   * manifest once to fail fast on misconfiguration and seed the memo.
    */
   async preflight(): Promise<Manifest> {
+    if (this.mode === "pinned" && this.pinHash === null && this.version) {
+      this.pinHash = await this.resolveVersion(this.version);
+      this.log(`resolved version ${this.version} → sha256:${this.pinHash}`);
+    }
     const t0 = Date.now();
-    const manifest = await this.loadManifest(); // cold: no memo yet
+    const manifest = await this.loadManifest();
     this.baselineMs = Date.now() - t0;
-    this.log(
-      `baseline latency ${this.baselineMs}ms → warm fetch bound ` +
-        `${this.timeoutFor(true)}ms (serve last-known-good past that)`,
-    );
+    if (this.mode === "live") {
+      this.log(
+        `baseline latency ${this.baselineMs}ms → warm fetch bound ` +
+          `${this.timeoutFor(true)}ms (serve last-known-good past that)`,
+      );
+    }
     return manifest;
+  }
+
+  /**
+   * Walk the signed manifest chain from latest, following `previous`, until
+   * serverInfo.version matches. Each hop is signature-verified and (past the
+   * head) hash-asserted against the link it was reached by — the chain is
+   * tamper-evident, like git history.
+   */
+  private async resolveVersion(version: string): Promise<string> {
+    let url = this.liveManifestUrl();
+    let expectHash: string | null = null;
+    for (let hop = 0; hop < 100_000; hop++) {
+      const sigUrl = `${url}.sig`;
+      const [bytes, sig] = await Promise.all([
+        fetchManifestBytes(url),
+        fetchSignature(sigUrl),
+      ]);
+      verifyManifestSignature(bytes, sig, url, sigUrl);
+      const actual = createHash("sha256").update(bytes).digest("hex");
+      if (expectHash && actual !== expectHash) {
+        throw new PinMismatchError(expectHash, actual, url);
+      }
+      const manifest = parseManifest(bytes, url);
+      if (manifest.serverInfo.version === version) return actual;
+      if (!manifest.previous) break; // reached genesis without a match
+      const prev = manifest.previous.replace(/^sha256:/, "");
+      url = this.snapshotManifestUrl(prev);
+      expectHash = prev;
+    }
+    throw new Error(
+      `Version "${version}" not found in the manifest chain at ${this.site}.`,
+    );
   }
 
   private warnFallback(err: unknown, what: string): void {

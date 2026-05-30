@@ -62,10 +62,15 @@ export interface FetchedResource {
 export async function fetchAndVerify(
   resource: Resource,
   signal?: AbortSignal,
+  urlOverride?: string,
 ): Promise<FetchedResource> {
+  // Live mode fetches the pretty `uri`; pinned mode passes the immutable
+  // `blob`. Verification is always against the manifest entry's hash + size,
+  // so the source URL doesn't affect what's accepted.
+  const url = urlOverride ?? resource.uri;
   let res: Response;
   try {
-    res = await fetch(resource.uri, { signal });
+    res = await fetch(url, { signal });
   } catch (cause) {
     throw new ResourceFetchError(resource, cause);
   }

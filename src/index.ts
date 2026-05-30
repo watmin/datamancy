@@ -39,8 +39,10 @@ import { fileURLToPath } from "node:url";
 import { Grimoire } from "./grimoire.js";
 import { createMcpServer, SUPPORTED_PROTOCOL_VERSION } from "./mcp.js";
 
-const MANIFEST_URL = "https://datamancy.dev/.well-known/mcp/manifest.json";
-const SIGNATURE_URL = "https://datamancy.dev/.well-known/mcp/manifest.json.sig";
+// The canonical origin. An org can override it (DATAMANCY_SITE) to serve a
+// cloned snapshot from its own host — the pinned public key still proves the
+// content, so they host the bytes but can't forge them.
+const DEFAULT_SITE = "https://datamancy.dev";
 
 const PACKAGE_NAME = "datamancy";
 
@@ -69,12 +71,21 @@ function log(...args: unknown[]): void {
   console.error(`[${PACKAGE_NAME}]`, ...args);
 }
 
-const grimoire = new Grimoire(MANIFEST_URL, SIGNATURE_URL, log);
+// Consumer-chosen posture, all via env (zero-config by default):
+//   DATAMANCY_SITE    — origin to fetch from (default datamancy.dev)
+//   DATAMANCY_PIN     — sha256:<manifest-hash> → immutable hash-pin
+//   DATAMANCY_VERSION — serverInfo.version → resolved via the signed chain
+const site = process.env.DATAMANCY_SITE?.trim() || DEFAULT_SITE;
+const pinRaw = process.env.DATAMANCY_PIN?.trim();
+const pinHash = pinRaw ? pinRaw.replace(/^sha256:/i, "") : null;
+const version = process.env.DATAMANCY_VERSION?.trim() || null;
+
+const grimoire = new Grimoire({ site, pinHash, version }, log);
 
 async function main(): Promise<void> {
   log(`booting v${PACKAGE_VERSION}`);
-  log(`manifest: ${MANIFEST_URL}`);
-  log(`signature: ${SIGNATURE_URL}`);
+  log(`origin: ${site}`);
+  log(`mode: ${grimoire.describe()}`);
 
   // Preflight: fail fast if the live manifest is unreachable or its
   // signature is invalid at launch. NOT a cache — serving re-fetches.
