@@ -113,10 +113,11 @@ export class StdioServer {
       return;
     }
 
-    // Notification path: id absent (or explicitly null per some
-    // implementations) — handler runs, no response sent regardless of
-    // outcome.
-    if (msg.id === undefined || msg.id === null) {
+    // Notification path: a notification is a request object WITHOUT an `id`
+    // member (JSON-RPC 2.0 §4.1). `id: null` is a VALID request id, not a
+    // notification — it still demands exactly one response, or a client that
+    // sent it deadlocks forever. So key off ABSENCE of id, never `=== null`.
+    if (!("id" in msg)) {
       const handler = this.notificationHandlers.get(msg.method);
       if (handler) {
         try {
@@ -130,11 +131,13 @@ export class StdioServer {
       return;
     }
 
-    // Request path: dispatch, send exactly one response.
+    // Request path: dispatch, send exactly one response. id may be null here
+    // (a valid id) — echo it back as-is.
+    const id: JsonRpcId = msg.id ?? null;
     const handler = this.requestHandlers.get(msg.method);
     if (!handler) {
       this.sendError(
-        msg.id,
+        id,
         ErrorCodes.MethodNotFound,
         `Method not found: ${msg.method}`,
       );
@@ -143,10 +146,10 @@ export class StdioServer {
 
     try {
       const result = await handler(msg.params);
-      this.sendResult(msg.id, result);
+      this.sendResult(id, result);
     } catch (err) {
       this.sendError(
-        msg.id,
+        id,
         ErrorCodes.InternalError,
         err instanceof Error ? err.message : String(err),
         err instanceof Error

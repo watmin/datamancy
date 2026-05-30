@@ -32,21 +32,27 @@ test("parses a valid schemaVersion-1 manifest", () => {
   assert.equal(m.resources[0].blob, `blobs/sha256/${H}`);
 });
 
-test("tolerates an old manifest without the new optional fields", () => {
-  const old = {
-    serverInfo: { name: "x", version: "y" },
-    trust: { algorithm: "SHA-256", tier: 2, signed: true },
-    resources: [
-      {
-        name: "a",
-        uri: "a/SKILL.md",
-        mimeType: "text/markdown",
-        sha256: "b".repeat(64),
-        size: 1,
-      },
-    ],
-  };
-  assert.doesNotThrow(() => parseManifest(bytes(old), "u"));
+test("REQUIRES schemaVersion, previous, and epoch — no silent-assumption bypass", () => {
+  for (const field of ["schemaVersion", "previous", "epoch"]) {
+    const bad = structuredClone(good);
+    delete bad[field];
+    assert.throws(
+      () => parseManifest(bytes(bad), "u"),
+      ManifestShapeError,
+      `missing ${field} must be rejected`,
+    );
+  }
+});
+
+test("REQUIRES every resource to carry its immutable blob", () => {
+  const bad = structuredClone(good);
+  delete bad.resources[0].blob;
+  assert.throws(() => parseManifest(bytes(bad), "u"), ManifestShapeError);
+});
+
+test("previous may be null (genesis) but must be present", () => {
+  const genesis = structuredClone(good); // previous: null
+  assert.doesNotThrow(() => parseManifest(bytes(genesis), "u"));
 });
 
 test("rejects a resource with a non-hex sha256", () => {

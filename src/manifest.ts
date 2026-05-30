@@ -36,9 +36,11 @@ export interface Resource {
   uri: string;
   /**
    * Immutable content-addressed URL (`/blobs/sha256/<hash>`). Pinned mode
-   * fetches this — it can never change because the URL IS the hash.
+   * fetches this — it can never change because the URL IS the hash. REQUIRED:
+   * a pinned read with no blob would silently fall back to the mutable `uri`,
+   * defeating the immutability pinning exists to guarantee.
    */
-  blob?: string;
+  blob: string;
   /** MIME type the server commits to serving. */
   mimeType: string;
   /** Hex-encoded SHA-256 of the resource content (64 lowercase hex chars). */
@@ -64,11 +66,27 @@ export interface TrustBlock {
 }
 
 export interface Manifest {
-  /** Document schema version — the FORMAT evolves on its own clock. */
-  schemaVersion?: number;
+  /**
+   * Document schema major — the break signal. REQUIRED and declared, never
+   * inferred: a manifest must state the format it speaks so a frozen kernel
+   * refuses a future major loud instead of assuming v1.
+   */
+  schemaVersion: number;
   serverInfo: ServerInfo;
-  /** Content address of the previous manifest — the chain backpointer. */
-  previous?: string | null;
+  /**
+   * Content address of the previous manifest — the chain backpointer.
+   * REQUIRED (may be `null` at genesis): the field is always present, so
+   * "genesis" is stated as `null`, never left ambiguous by omission.
+   */
+  previous: string | null;
+  /**
+   * Monotone version stamp (unix seconds at publish). REQUIRED — the kernel's
+   * rollback protection on the live `latest` pointer depends on it; an optional
+   * epoch would let a no-epoch manifest bypass the gate entirely. An authentic
+   * manifest whose epoch regressed below the highest seen this session is
+   * refused.
+   */
+  epoch: number;
   trust: TrustBlock;
   resources: Resource[];
 }
@@ -95,7 +113,7 @@ function isResource(x: unknown): x is Resource {
   return (
     typeof r.name === "string" &&
     resolves(r.uri) &&
-    (r.blob === undefined || resolves(r.blob)) &&
+    resolves(r.blob) &&
     typeof r.mimeType === "string" &&
     typeof r.sha256 === "string" &&
     HEX64.test(r.sha256) &&
@@ -121,15 +139,12 @@ function isManifest(x: unknown): x is Manifest {
   if (typeof t.signed !== "boolean") return false;
   if (!Array.isArray(m.resources)) return false;
   if (!m.resources.every(isResource)) return false;
-  // New (optional) chain/format fields — validate type when present.
-  if (m.schemaVersion !== undefined && typeof m.schemaVersion !== "number") {
-    return false;
-  }
-  if (
-    m.previous !== undefined &&
-    m.previous !== null &&
-    typeof m.previous !== "string"
-  ) {
+  // Chain/format fields are REQUIRED — no silent-assumption bypass. Every
+  // manifest must DECLARE its format major, its chain position (null at
+  // genesis), and its freshness stamp.
+  if (typeof m.schemaVersion !== "number") return false;
+  if (m.previous !== null && typeof m.previous !== "string") return false;
+  if (typeof m.epoch !== "number" || !Number.isFinite(m.epoch) || m.epoch < 0) {
     return false;
   }
   return true;

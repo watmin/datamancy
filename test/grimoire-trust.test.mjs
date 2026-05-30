@@ -27,6 +27,7 @@ const manifestObj = {
   schemaVersion: 1,
   serverInfo: { name: "test", version: "2026-05-30T00-00-00Z" },
   previous: null,
+  epoch: 1,
   trust: { algorithm: "SHA-256", tier: 2, signed: true },
   resources: [resource],
 };

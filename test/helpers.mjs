@@ -32,12 +32,14 @@ export function resourceFor(name, body, extra = {}) {
   };
 }
 
-/** A well-formed schemaVersion-1 manifest over `resources`. */
+/** A well-formed schemaVersion-1 manifest over `resources`. All rigid-required
+ *  fields (schemaVersion, previous, epoch) are present; override via `extra`. */
 export function manifestFor(resources, extra = {}) {
   return {
     schemaVersion: 1,
     serverInfo: { name: "test", version: "2026-05-30T00-00-00Z" },
     previous: null,
+    epoch: 1,
     trust: { algorithm: "SHA-256", tier: 2, signed: true },
     resources,
     ...extra,

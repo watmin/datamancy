@@ -44,14 +44,36 @@ test("a schemaVersion EQUAL to the kernel major is accepted", () => {
   assert.equal(m.schemaVersion, KERNEL_SCHEMA_MAJOR);
 });
 
-test("an absent schemaVersion is accepted (treated as the base format)", () => {
+test("an absent schemaVersion is REJECTED — the format major must be declared", () => {
   const m = manifestFor([resourceFor("a", "x")]);
   delete m.schemaVersion;
-  assert.equal(parse(m).resources.length, 1);
+  assert.throws(() => parse(m), ManifestShapeError);
 });
 
 test("zero resources is a valid (empty) grimoire", () => {
   assert.equal(parse(manifestFor([])).resources.length, 0);
+});
+
+test("a numeric epoch is accepted (the rollback freshness stamp)", () => {
+  const m = parse(manifestFor([resourceFor("a", "x")], { epoch: 1780000000 }));
+  assert.equal(m.epoch, 1780000000);
+});
+
+test("an absent epoch is REJECTED — the rollback gate must never be bypassable", () => {
+  const m = manifestFor([resourceFor("a", "x")]);
+  delete m.epoch;
+  assert.throws(() => parse(m), ManifestShapeError);
+});
+
+test("a non-numeric / non-finite epoch is refused as corrupt shape", () => {
+  assert.throws(
+    () => parse(manifestFor([resourceFor("a", "x")], { epoch: "soon" })),
+    ManifestShapeError,
+  );
+  assert.throws(
+    () => parse(manifestFor([resourceFor("a", "x")], { epoch: Infinity })),
+    ManifestShapeError,
+  );
 });
 
 // ── MUST NOT change without a new major: breaking shapes refuse LOUD ──

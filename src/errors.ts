@@ -70,6 +70,28 @@ export class BadParamsError extends DatamancyError {
   }
 }
 
+/**
+ * A `latest` manifest whose monotone `epoch` regressed below the highest we've
+ * verified this session — an authentic-but-stale manifest replayed to roll a
+ * consumer back to older content (TUF rollback). Verification-class: serve
+ * last-known-good LOUD, never the stale bytes.
+ */
+export class RollbackError extends DatamancyError {
+  readonly severity = "verification";
+  constructor(
+    public served: number,
+    public highest: number,
+    public url: string,
+  ) {
+    super(
+      `Rollback detected at ${url}: served manifest epoch ${served} is older ` +
+        `than the highest verified epoch ${highest} seen this session. An ` +
+        `older 'latest' is a replay/rollback — REFUSING, serving ` +
+        `last-known-good.`,
+    );
+  }
+}
+
 /** A pinned manifest whose bytes don't hash to the requested pin. */
 export class PinMismatchError extends DatamancyError {
   readonly severity = "verification";

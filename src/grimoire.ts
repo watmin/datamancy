@@ -36,8 +36,10 @@ import {
   isVerificationFailure,
   UnknownResourceError,
   BadPinError,
+  BadParamsError,
   VersionNotFoundError,
   PinMismatchError,
+  RollbackError,
 } from "./errors.js";
 
 /** A manifest paired with the content-address (its SHA-256) that names it. */
@@ -107,6 +109,9 @@ export class Grimoire {
   private contentMemo = new Map<string, FetchedResource>();
   /** Sorted spell-name set last seen — detects spell add/remove (live mode). */
   private knownSpellSet: string | null = null;
+  /** Highest manifest `epoch` verified this session — the rollback high-water
+   *  mark. A live `latest` whose epoch regressed below this is a replay. */
+  private highestEpoch = Number.NEGATIVE_INFINITY;
 
   constructor(
     config: GrimoireConfig,
@@ -170,6 +175,13 @@ export class Grimoire {
     if (this.mode === "pinned" && this.frozenManifest) {
       return this.frozenManifest; // immutable — loaded once, never re-fetched
     }
+    if (this.mode === "pinned" && this.pinHash === null) {
+      // Version pin not yet resolved — preflight() resolves it first. Guard so
+      // an out-of-order direct call can't fetch the nonsense /manifests/null/.
+      throw new BadParamsError(
+        "Pinned-by-version requires preflight() to resolve the version first.",
+      );
+    }
     const url =
       this.mode === "pinned"
         ? this.snapshotManifestUrl(this.pinHash as string)
@@ -180,6 +192,21 @@ export class Grimoire {
     const expectHash = this.mode === "pinned" ? this.pinHash : null;
     try {
       const vm = await this.fetchOne(url, expectHash, signal);
+      // Rollback protection (live mode): the signed manifest carries a monotone
+      // `epoch`. Refuse a `latest` whose epoch regressed below the highest we've
+      // verified this session — an authentic-but-STALE manifest replayed by a
+      // mirror/network attacker (TUF rollback). The check+advance is fully
+      // synchronous (no await between read, compare, assign), so concurrent
+      // loads can't race it: whichever verified manifest resolves first sets the
+      // high-water mark; a later-resolving OLDER one is rejected here — before it
+      // can overwrite the memo, rewind the spell set, or re-emit list_changed.
+      if (this.mode === "live") {
+        const ep = vm.manifest.epoch; // required field — always present
+        if (ep < this.highestEpoch) {
+          throw new RollbackError(ep, this.highestEpoch, url);
+        }
+        this.highestEpoch = ep;
+      }
       this.manifestMemo = vm; // remember ONLY verified-good (manifest + its hash)
       if (this.mode === "pinned") this.frozenManifest = vm; // freeze
       return vm;
@@ -224,8 +251,9 @@ export class Grimoire {
     if (!resource) {
       throw new UnknownResourceError(uri);
     }
-    const path =
-      this.mode === "pinned" ? (resource.blob ?? resource.uri) : resource.uri;
+    // Pinned mode fetches the immutable content-addressed blob (always present
+    // — a required field); live mode fetches the pretty uri.
+    const path = this.mode === "pinned" ? resource.blob : resource.uri;
     const fetchUrl = this.resolve(path);
     const signal = AbortSignal.timeout(
       this.timeoutFor(this.contentMemo.has(uri)),

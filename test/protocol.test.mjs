@@ -101,6 +101,22 @@ test("a batch of garbage interleaved with one good request: the good one still a
   assert.deepEqual(ok.result, { ok: true });
 });
 
+test("a request with id:null IS answered — null is a valid id, not a notification", async () => {
+  // The deadlock class: treating id:null as a notification drops the response
+  // and the client hangs forever. null must round-trip as a request id.
+  const out = await drive([
+    JSON.stringify({ jsonrpc: "2.0", id: null, method: "ok" }),
+  ]);
+  assert.equal(out.length, 1, "exactly one response (not swallowed)");
+  assert.equal(out[0].id, null);
+  assert.deepEqual(out[0].result, { ok: true });
+});
+
+test("a true notification (NO id member) still produces no response", async () => {
+  const out = await drive([JSON.stringify({ jsonrpc: "2.0", method: "note" })]);
+  assert.equal(out.length, 0);
+});
+
 test("a 5 MB line does not crash the dispatcher", async () => {
   const big = "x".repeat(5 * 1024 * 1024);
   const out = await drive([big]);

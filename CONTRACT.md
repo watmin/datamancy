@@ -45,8 +45,7 @@ Each is proven by a test; an already-installed v1 client keeps working.
    `mimeType` string (it is never inspected; bodies are still UTF-8 text).
 9. **Publish an arbitrarily long version chain.** The walk is iterative and
    each hop is hash-asserted; cycles are cryptographically impossible.
-10. **Omit `blob`** on a resource — pinned mode falls back to `uri`.
-11. **Self-host.** Manifest paths are origin-relative; an org may clone a
+10. **Self-host.** Manifest paths are origin-relative; an org may clone a
     snapshot and serve it from its own host (`DATAMANCY_SITE`). The pinned key
     still proves the content — they host the bytes but cannot forge them.
 
@@ -64,9 +63,22 @@ rejection) — never a silent misread.
    remain `{ name:string, version:string }` (extras OK); `resources` must
    remain a JSON **array**. Dropping or retyping any of these → refusal.
 3. **Every resource must keep** `name:string`, `uri:` (URL-resolvable string),
-   `mimeType:string`, `sha256:` (64 **lowercase** hex), `size:` (finite ≥ 0).
-   Renaming `sha256`→`digest`, dropping `size`, or an uppercase/short hash →
-   refusal.
+   `blob:` (URL-resolvable content-address — **required**, never omitted, or a
+   pinned read would silently fetch the mutable `uri`), `mimeType:string`,
+   `sha256:` (64 **lowercase** hex), `size:` (finite, `0 ≤ size ≤ 16 MiB`).
+   Renaming `sha256`→`digest`, dropping `size`/`blob`, or an uppercase/short
+   hash → refusal. (`description` is the one optional resource field.)
+3a. **Every manifest must DECLARE — never imply by omission** — `schemaVersion`
+   (number), `previous` (a content-address string, or `null` at genesis, but
+   the field MUST be present), and `epoch` (a finite number ≥ 0). These are not
+   optional: an absent `epoch` would bypass rollback protection, an absent
+   `schemaVersion` would be silently assumed to be major 1, and an absent
+   `previous` would make the chain root ambiguous. Omitting any → refusal.
+3b. **`epoch` MUST strictly increase with every published `latest`.** The
+   consumer refuses a live `latest` whose `epoch` regressed below the highest it
+   verified this session (rollback protection). The generator enforces this at
+   the source (`epoch = max(now, prevEpoch + 1)`); a publisher must never hand-
+   author a non-increasing epoch.
 4. **Field *meaning* is frozen.** `sha256` is over the *exact bytes served*;
    `size` is those bytes' length; the body is **UTF-8 text**. You may not
    overload an existing field (e.g. make `sha256` mean "hash of the compressed

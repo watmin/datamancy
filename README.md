@@ -114,6 +114,33 @@ genuinely stuck fetch bails to last-known-good rather than hanging.
 | Website-only compromise, *replay an old signed manifest* | ~ accepted by design: authentic but stale, low-stakes for a grimoire (a pinned consumer is immune — it froze a known-good hash) |
 | Website + KMS signing key both compromised | ✗ (the key is the anchor; it's non-exportable in KMS — protect the AWS account) |
 
+## Verifying the pinned key
+
+The pinned ECDSA P-256 key ships in this package (`dist/pinned-pubkey.js`).
+Trust-on-first-use is only as strong as your ability to confirm the key is the
+real one, so its fingerprint — `SHA-256` over the DER-encoded public key — is:
+
+```
+09db7668a3a0ea27c52de060081c0a70584181c02f9eb94eff6941f904b5f12e
+```
+
+Compute it yourself and compare:
+
+```bash
+node --input-type=module -e 'import{createPublicKey,createHash}from"node:crypto";\
+import{PINNED_PUBKEY_PEM}from"datamancy/dist/pinned-pubkey.js";\
+console.log(createHash("sha256").update(createPublicKey({key:PINNED_PUBKEY_PEM,format:"pem"}).export({type:"spki",format:"der"})).digest("hex"))'
+```
+
+Cross-check that fingerprint against independent channels before relying on the
+package — it should match in all of them:
+- the git source — `github.com/watmin/datamancy` (`src/pinned-pubkey.ts`)
+- the practitioner identity card at [datamancer.dev](https://datamancer.dev)
+- _(planned)_ a `_datamancy-key` DNS `TXT` record — the strongest channel, on
+  separate infrastructure from npm and the website
+
+If the key in your install doesn't match these, **do not trust it.**
+
 ## Built to never change
 
 This package is designed to be **published once and never patched** — the
