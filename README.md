@@ -136,8 +136,8 @@ Cross-check that fingerprint against independent channels before relying on the
 package — it should match in all of them:
 - the git source — `github.com/watmin/datamancy` (`src/pinned-pubkey.ts`)
 - the practitioner identity card at [datamancer.dev](https://datamancer.dev)
-- _(planned)_ a `_datamancy-key` DNS `TXT` record — the strongest channel, on
-  separate infrastructure from npm and the website
+- a DNS `TXT` record on separate infrastructure from npm, github, and the
+  website: `dig +short TXT _datamancy-key.datamancer.dev`
 
 If the key in your install doesn't match these, **do not trust it.**
 
