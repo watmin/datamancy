@@ -21,10 +21,13 @@
  *      manifest entry. Mismatch → structured error, content NEVER returned.
  */
 
+import { createHash } from "node:crypto";
+
 import { fetchManifestBytes, parseManifest } from "./manifest.js";
 import { fetchSignature, verifyManifestSignature } from "./signature.js";
 import { fetchAndVerify } from "./resources.js";
 import { createMcpServer, SUPPORTED_PROTOCOL_VERSION } from "./mcp.js";
+import { PINNED_MANIFEST_SHA256 } from "./pinned-manifest-hash.js";
 
 const MANIFEST_URL = "https://datamancy.dev/.well-known/mcp/manifest.json";
 const SIGNATURE_URL = "https://datamancy.dev/.well-known/mcp/manifest.json.sig";
@@ -45,6 +48,25 @@ async function main(): Promise<void> {
   const manifestBytes = await fetchManifestBytes(MANIFEST_URL);
   log(`manifest fetched: ${manifestBytes.byteLength} bytes`);
 
+  // Tier 3: the pinned manifest hash is the strongest gate. Defeating it
+  // requires compromising the npm publish chain, not merely the website
+  // or the signing key. Check it FIRST: it short-circuits an unnecessary
+  // signature fetch, and on the common "manifest changed, package stale"
+  // case it yields an actionable npm-update message before any crypto runs.
+  const actualManifestHash = createHash("sha256")
+    .update(manifestBytes)
+    .digest("hex");
+  if (actualManifestHash !== PINNED_MANIFEST_SHA256) {
+    throw new Error(
+      `Manifest hash mismatch. Expected ${PINNED_MANIFEST_SHA256} ` +
+        `(pinned in this npm package), got ${actualManifestHash} ` +
+        `(from the live manifest). The manifest at datamancy.dev has ` +
+        `changed since this package version was published. Update to the ` +
+        `latest: \`npm update datamancy\` or \`npx -y datamancy@latest\`.`,
+    );
+  }
+  log(`manifest SHA-256 matches pinned value (tier 3)`);
+
   const signatureBytes = await fetchSignature(SIGNATURE_URL);
   log(`signature fetched: ${signatureBytes.byteLength} bytes`);
 
@@ -62,8 +84,6 @@ async function main(): Promise<void> {
       `trust=tier${manifest.trust.tier}, signed=${manifest.trust.signed}, ` +
       `server=${manifest.serverInfo.name}@${manifest.serverInfo.version}`,
   );
-
-  // TODO Arc M3: verify SHA-256 of manifestBytes against PINNED_MANIFEST_HASH
 
   const byUri = new Map(manifest.resources.map((r) => [r.uri, r]));
 
