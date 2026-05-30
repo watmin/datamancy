@@ -25,7 +25,7 @@ import { BadParamsError } from "./errors.js";
  * Default protocol version — what we offer when the client's requested version
  * isn't one we recognize (a spec-compliant "respond with a version we support").
  */
-export const SUPPORTED_PROTOCOL_VERSION = "2024-11-05";
+export const DEFAULT_PROTOCOL_VERSION = "2024-11-05";
 
 /**
  * Protocol versions this server can serve identically. We expose only the
@@ -47,7 +47,7 @@ export function negotiateProtocolVersion(requested: unknown): string {
   return typeof requested === "string" &&
     SERVICEABLE_PROTOCOL_VERSIONS.has(requested)
     ? requested
-    : SUPPORTED_PROTOCOL_VERSION;
+    : DEFAULT_PROTOCOL_VERSION;
 }
 
 export interface ServerInfo {

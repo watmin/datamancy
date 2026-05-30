@@ -52,7 +52,9 @@ export async function fetchSignature(
 ): Promise<Uint8Array> {
   let res: Response;
   try {
-    res = await fetch(url, { signal });
+    // redirect:"error" — a 3xx can't make the kernel emit an attacker-chosen
+    // outbound request (SSRF) before verification. Origin serves directly.
+    res = await fetch(url, { signal, redirect: "error" });
   } catch (cause) {
     throw new SignatureFetchError(url, cause);
   }

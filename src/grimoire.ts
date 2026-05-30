@@ -62,6 +62,12 @@ export interface SpellRead {
 const COLD_TIMEOUT_MS = 15_000;
 const WARM_TIMEOUT_MS = 5_000;
 
+// Bound the chain walk when resolving a version LABEL to a hash. Unbounded, a
+// deep or never-matching DATAMANCY_VERSION would fetch+verify the entire signed
+// history at boot — a self-inflicted slow start. Older versions stay reachable
+// by exact hash pin (DATAMANCY_PIN, which fetches one immutable snapshot).
+const MAX_VERSION_WALK = 100;
+
 export interface GrimoireConfig {
   /** Origin, e.g. "https://datamancy.dev". */
   site: string;
@@ -380,7 +386,9 @@ export class Grimoire {
 
   /** Resolve a version label to its manifest hash by walking the chain. */
   private async resolveVersion(version: string): Promise<string> {
-    for await (const { hash, manifest } of this.walkChain()) {
+    // Bounded — see MAX_VERSION_WALK. A label deeper than this resolves only by
+    // exact hash pin, not by name.
+    for await (const { hash, manifest } of this.walkChain(MAX_VERSION_WALK)) {
       if (manifest.serverInfo.version === version) return hash;
     }
     throw new VersionNotFoundError(version, this.site);

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   createMcpServer,
   negotiateProtocolVersion,
-  SUPPORTED_PROTOCOL_VERSION,
+  DEFAULT_PROTOCOL_VERSION,
   SERVICEABLE_PROTOCOL_VERSIONS,
 } from "../dist/mcp.js";
 import { captureStdout } from "./helpers.mjs";
@@ -36,9 +36,9 @@ test("negotiateProtocolVersion ECHOES a serviceable requested version", () => {
 });
 
 test("negotiateProtocolVersion falls back to the default for an unknown/garbage request", () => {
-  assert.equal(negotiateProtocolVersion("3025-01-01"), SUPPORTED_PROTOCOL_VERSION);
-  assert.equal(negotiateProtocolVersion(undefined), SUPPORTED_PROTOCOL_VERSION);
-  assert.equal(negotiateProtocolVersion(42), SUPPORTED_PROTOCOL_VERSION);
+  assert.equal(negotiateProtocolVersion("3025-01-01"), DEFAULT_PROTOCOL_VERSION);
+  assert.equal(negotiateProtocolVersion(undefined), DEFAULT_PROTOCOL_VERSION);
+  assert.equal(negotiateProtocolVersion(42), DEFAULT_PROTOCOL_VERSION);
 });
 
 test("initialize echoes a NEWER serviceable version the client requested", async () => {
@@ -48,7 +48,7 @@ test("initialize echoes a NEWER serviceable version the client requested", async
 
 test("initialize offers the default when the client requests an unknown version", async () => {
   const r = await call("initialize", { protocolVersion: "3025-01-01" });
-  assert.equal(r.result.protocolVersion, SUPPORTED_PROTOCOL_VERSION);
+  assert.equal(r.result.protocolVersion, DEFAULT_PROTOCOL_VERSION);
 });
 
 test("initialize advertises resources with listChanged, no subscribe", async () => {

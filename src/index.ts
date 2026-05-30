@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 
 import { Grimoire } from "./grimoire.js";
 import { createGrimoireHandlers } from "./handlers.js";
-import { createMcpServer, SUPPORTED_PROTOCOL_VERSION } from "./mcp.js";
+import { createMcpServer, DEFAULT_PROTOCOL_VERSION } from "./mcp.js";
 import type { StdioServer } from "./protocol.js";
 
 // The canonical origin. An org can override it (DATAMANCY_SITE) to serve a
@@ -164,7 +164,7 @@ async function runServer(): Promise<void> {
   server = createMcpServer(handlers);
 
   log(
-    `listening on stdio (MCP ${SUPPORTED_PROTOCOL_VERSION}) — ` +
+    `listening on stdio (MCP ${DEFAULT_PROTOCOL_VERSION}) — ` +
       `manifest fetched fresh per request, content upgrades live`,
   );
   await server.listen();

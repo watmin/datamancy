@@ -76,18 +76,23 @@ test("a regressed epoch is REFUSED loud; the memo keeps the newer manifest", asy
   assert.ok(!c.quiet(), "not misclassified as transport");
 });
 
-test("a higher epoch is accepted (legit update advances the high-water mark)", async () => {
+test("a higher epoch ADVANCES the high-water mark — a later regression to a once-valid epoch is then refused", async () => {
   install();
-  const g = live(() => {});
-  await g.preflight(); // 2000
-  serve = evenNewer; // 3000
-  const list = await g.list();
-  assert.equal(list.length, 2);
-  // and a subsequent rollback to 2000 is now refused (high-water advanced to 3000)
-  serve = newer;
   const c = logCollector();
-  const g2 = live(c.log); // fresh session; prove monotonicity independently below
-  void g2;
+  const g = live(c.log);
+  await g.preflight(); // accept epoch 2000 → high-water 2000
+  serve = evenNewer; // 3000
+  assert.equal((await g.list()).length, 2); // accepted → high-water ADVANCES to 3000
+  // Same session: epoch 2000 was fine moments ago, but the mark advanced to
+  // 3000, so a replay of 2000 is now a refused rollback (this is the half the
+  // preflight-baseline tests don't prove — that the mark actually moves).
+  serve = newer; // 2000
+  assert.equal(
+    (await g.list()).length,
+    2,
+    "served last-known-good (3000), NOT the now-stale 2000",
+  );
+  assert.ok(c.loud(), "the advance is real — 2000 is now a refused rollback, logged LOUD");
 });
 
 test("an EQUAL epoch is accepted (re-publish within the same second)", async () => {

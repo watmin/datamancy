@@ -124,6 +124,28 @@ test("a resource at exactly the memory ceiling is structurally accepted", () => 
   assert.equal(parse(manifestFor([r])).resources[0].size, MAX_RESOURCE_BYTES);
 });
 
+test("a `previous` that isn't sha256:<hex64> is refused (no fetch-URL injection)", () => {
+  for (const bad of [
+    "../../evil",
+    "https://evil.example/x",
+    "sha256:NOTHEX",
+    "deadbeef",
+    "sha256:" + "a".repeat(63), // one short
+  ]) {
+    assert.throws(
+      () => parse(manifestFor([resourceFor("a", "x")], { previous: bad })),
+      ManifestShapeError,
+      `previous=${bad} must be refused`,
+    );
+  }
+});
+
+test("a valid sha256:<hex64> previous (or null genesis) is accepted", () => {
+  const h = "sha256:" + "a".repeat(64);
+  assert.equal(parse(manifestFor([resourceFor("a", "x")], { previous: h })).previous, h);
+  assert.equal(parse(manifestFor([resourceFor("a", "x")], { previous: null })).previous, null);
+});
+
 test("changing trust.algorithm off SHA-256 is refused (crypto-agility = new major)", () => {
   assert.throws(
     () =>

@@ -54,14 +54,12 @@ export async function readCappedBody(
 ): Promise<Uint8Array> {
   const body = res.body;
   if (!body) {
-    // No stream available (not expected from Node's fetch, but be safe): fall
-    // back to arrayBuffer, then still enforce the cap so we never RETURN more
-    // than the bound even if we briefly buffered it.
-    const buf = new Uint8Array(await res.arrayBuffer());
-    if (buf.byteLength > maxBytes) {
-      throw new BodyTooLargeError(maxBytes, buf.byteLength);
-    }
-    return buf;
+    // A null body is a bodyless response (no content) — zero bytes by the fetch
+    // spec. Return empty rather than calling unbounded arrayBuffer(), so the
+    // memory-bounded-by-cap invariant is TOTAL: no branch can ever buffer an
+    // unbounded body. Downstream size/hash/signature checks reject this for any
+    // resource that declares content.
+    return new Uint8Array(0);
   }
 
   const reader = body.getReader();

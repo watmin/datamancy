@@ -111,7 +111,7 @@ genuinely stuck fetch bails to last-known-good rather than hanging.
 | Tamper one spell file | ✓ Layer 1 (hash mismatch on fetch) |
 | Tamper manifest + spell files together | ✓ Layer 2 (signature invalid) |
 | Full website compromise + replace everything | ✓ Layer 2 (attacker lacks the non-exportable KMS private key) |
-| Website-only compromise, *replay an old signed manifest* | ~ accepted by design: authentic but stale, low-stakes for a grimoire (a pinned consumer is immune — it froze a known-good hash) |
+| Website-only compromise, *replay an old signed manifest* | ~ **in-session: refused** — the kernel rejects a `latest` whose signed `epoch` regressed below the highest it verified this session (`RollbackError`, loud). **Cross-restart / first-contact: accepted by design** — authentic but stale, low-stakes for a grimoire; a pinned consumer is immune (froze a known-good hash). |
 | Website + KMS signing key both compromised | ✗ (the key is the anchor; it's non-exportable in KMS — protect the AWS account) |
 
 ## Verifying the pinned key
@@ -124,9 +124,11 @@ real one, so its fingerprint — `SHA-256` over the DER-encoded public key — i
 09db7668a3a0ea27c52de060081c0a70584181c02f9eb94eff6941f904b5f12e
 ```
 
-Compute it yourself and compare:
+Compute it yourself and compare (the `npm install` makes the package importable
+— the `npx` MCP-config install above creates no local `node_modules`):
 
 ```bash
+npm install datamancy
 node --input-type=module -e 'import{createPublicKey,createHash}from"node:crypto";\
 import{PINNED_PUBKEY_PEM}from"datamancy/dist/pinned-pubkey.js";\
 console.log(createHash("sha256").update(createPublicKey({key:PINNED_PUBKEY_PEM,format:"pem"}).export({type:"spki",format:"der"})).digest("hex"))'

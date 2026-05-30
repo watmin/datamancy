@@ -143,7 +143,17 @@ function isManifest(x: unknown): x is Manifest {
   // manifest must DECLARE its format major, its chain position (null at
   // genesis), and its freshness stamp.
   if (typeof m.schemaVersion !== "number") return false;
-  if (m.previous !== null && typeof m.previous !== "string") return false;
+  // `previous` is a content-address — null at genesis, else `sha256:<hex64>`.
+  // Gate it as strictly as `sha256` (not merely "string"), so a garbage
+  // backpointer can't be interpolated into a fetch URL before the hash
+  // assertion that walks the chain ever runs.
+  if (
+    m.previous !== null &&
+    (typeof m.previous !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/.test(m.previous))
+  ) {
+    return false;
+  }
   if (typeof m.epoch !== "number" || !Number.isFinite(m.epoch) || m.epoch < 0) {
     return false;
   }
@@ -199,6 +209,10 @@ export async function fetchManifestBytes(
     res = await fetch(url, {
       headers: { Accept: "application/json" },
       signal,
+      // No redirects: a 3xx from a hosting-only attacker would make the kernel
+      // emit an attacker-chosen outbound request (SSRF) BEFORE any verification
+      // runs. The origin must serve content directly. redirect:"error" rejects.
+      redirect: "error",
     });
   } catch (cause) {
     throw new ManifestFetchError(url, cause);
@@ -237,10 +251,10 @@ export function parseManifest(bytes: Uint8Array, sourceUrl: string): Manifest {
   // A schemaVersion newer than this frozen kernel understands is a breaking
   // format we must not interpret. Refuse LOUD (verification-class) — never
   // silently parse a future v2 as if it were v1.
-  if (
-    data.schemaVersion !== undefined &&
-    data.schemaVersion > KERNEL_SCHEMA_MAJOR
-  ) {
+  // schemaVersion is REQUIRED + validated as a number by isManifest above, so
+  // it is always present here — no `!== undefined` guard (which would whisper
+  // an optionality CONTRACT rule 3a explicitly denies).
+  if (data.schemaVersion > KERNEL_SCHEMA_MAJOR) {
     throw new ManifestSchemaError(
       sourceUrl,
       data.schemaVersion,

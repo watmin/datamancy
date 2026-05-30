@@ -7,7 +7,8 @@ holds if the frozen kernel can consume every reasonable future evolution of
 `datamancy.dev` without a code change.
 
 This document is that boundary, made explicit and **enforced by tests**
-(`test/forward-compat.test.mjs` and the body/encoding/chain suites). It is the
+(`test/forward-compat.test.mjs`, `http.test.mjs`, `chain.test.mjs`, `ssrf.test.mjs`,
+and the rest of `npm test`). It is the
 rulebook the markdown-managers live by. Two lists: what the website **MAY**
 change freely, and what it **MUST NEVER** change without minting a new major.
 
@@ -28,7 +29,10 @@ Everything here is empirically verified against the shipped `dist/` kernel.
 
 ## The website MAY change these freely — the frozen kernel tolerates them
 
-Each is proven by a test; an already-installed v1 client keeps working.
+Most are proven by a test; items 8–9 (scale, chain termination) are guaranteed
+by construction — the kernel never counts resources or inspects `mimeType`, and
+the content-addressed chain makes cycles infeasible. An already-installed v1
+client keeps working.
 
 1. **Edit any spell's content.** New SHA-256 + size in the manifest, re-sign,
    push. This is the everyday path — the whole point.
@@ -94,8 +98,15 @@ rejection) — never a silent misread.
    `/.well-known/mcp/manifest.json`; snapshots at
    `/manifests/<hash>/manifest.json`; detached DER signature at
    `…/manifest.json.sig`; signed by the pinned P-256 key.
-7. **`previous` must be a content-address whose target bytes hash to it.** A
-   backpointer to non-matching bytes is rejected (tamper-evident chain).
+7. **`previous` must be `null` (genesis) or exactly `sha256:<64-lowercase-hex>`,
+   and its target bytes must hash to it.** The kernel shape-gates the format
+   (not merely "a string") so a garbage backpointer can't be interpolated into a
+   fetch URL, and rejects a non-matching target (tamper-evident chain).
+8. **The origin must serve manifest, signature, and content DIRECTLY — no 3xx
+   redirects.** The kernel fetches with `redirect: "error"`: a redirect is
+   refused, because following one would let a hosting-only attacker turn the
+   kernel into an SSRF request-forwarder (an attacker-chosen outbound request
+   before any verification). Self-hosters and mirrors must serve directly too.
 
 ---
 
@@ -129,10 +140,12 @@ the design, not bugs:
   bumps, but if a future MCP revision changes the *shape* of the `resources`
   capability or the read envelope, that is a new-major event. The serviceable
   set in `src/mcp.ts` is the explicit compatibility bound.
-- **Node platform drift.** Every runtime API used is stable, non-experimental,
-  and warning-free at the `engines` floor (Node ≥ 20), verified through Node
-  24.x. A far-future Node removing a stdlib API is outside any frozen artifact's
-  control.
+- **Node platform drift.** Every runtime API used is warning-free and
+  behaviourally stable at the `engines` floor (Node ≥ 20), verified empirically
+  Node 20.0.0 → 24.x. (Global `fetch` and Web Streams carry an "experimental"
+  API-surface label until Node 21, but on Node 20 they run warning-free and
+  unchanged — confirmed by running the floor, not just Node 24.) A far-future
+  Node removing a stdlib API is outside any frozen artifact's control.
 - **Rollback protection is per-session, by design.** The kernel refuses a live
   `latest` whose `epoch` regressed below the highest it verified *this process
   lifetime* — so a long-lived session cannot be silently reverted. It does NOT
