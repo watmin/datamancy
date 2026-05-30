@@ -67,9 +67,11 @@ test("rejects a wrong-typed schemaVersion", () => {
   assert.throws(() => parseManifest(bytes(bad), "u"), ManifestShapeError);
 });
 
-test("rejects invalid JSON", () => {
+test("rejects invalid JSON as a shape (verification) failure, not transport", () => {
+  // Bytes that passed signature verification but aren't valid JSON are a
+  // corrupt trust root — a verification-class failure.
   assert.throws(
     () => parseManifest(Buffer.from("{not json"), "u"),
-    ManifestFetchError,
+    ManifestShapeError,
   );
 });

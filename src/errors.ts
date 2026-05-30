@@ -61,3 +61,27 @@ export class VersionNotFoundError extends DatamancyError {
     super(`Version "${version}" not found in the manifest chain at ${site}.`);
   }
 }
+
+/** A request with malformed/missing params (e.g. resources/read without uri). */
+export class BadParamsError extends DatamancyError {
+  readonly severity = "config";
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/** A pinned manifest whose bytes don't hash to the requested pin. */
+export class PinMismatchError extends DatamancyError {
+  readonly severity = "verification";
+  constructor(
+    public expected: string,
+    public actual: string,
+    public url: string,
+  ) {
+    super(
+      `Pin mismatch at ${url}: expected sha256:${expected}, got ` +
+        `sha256:${actual}. The bytes served for this pinned version do not ` +
+        `match the requested hash — REFUSING.`,
+    );
+  }
+}

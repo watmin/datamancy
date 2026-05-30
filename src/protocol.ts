@@ -56,17 +56,10 @@ export const ErrorCodes = {
 export type RequestHandler = (params: unknown) => Promise<unknown>;
 export type NotificationHandler = (params: unknown) => Promise<void>;
 
-export interface ListenOptions {
-  /** Defaults to process.stdin. */
-  input?: NodeJS.ReadableStream;
-  /** Defaults to process.stdout. */
-  output?: NodeJS.WritableStream;
-}
-
 export class StdioServer {
   private requestHandlers = new Map<string, RequestHandler>();
   private notificationHandlers = new Map<string, NotificationHandler>();
-  private out: NodeJS.WritableStream = stdout;
+  private readonly out: NodeJS.WritableStream = stdout;
 
   onRequest(method: string, handler: RequestHandler): void {
     this.requestHandlers.set(method, handler);
@@ -84,16 +77,12 @@ export class StdioServer {
   }
 
   /**
-   * Begin reading from stdin (or supplied stream). Resolves only when the
-   * input stream closes. Errors during message handling are logged to
-   * stderr but do not stop the loop — a bad message must not take down
-   * the server.
+   * Begin reading JSON-RPC lines from stdin. Resolves only when stdin closes.
+   * Errors during message handling are logged to stderr but do not stop the
+   * loop — a bad message must not take down the server.
    */
-  async listen(options: ListenOptions = {}): Promise<void> {
-    const input = options.input ?? stdin;
-    this.out = options.output ?? stdout;
-
-    const rl = createInterface({ input, crlfDelay: Infinity });
+  async listen(): Promise<void> {
+    const rl = createInterface({ input: stdin, crlfDelay: Infinity });
     for await (const line of rl) {
       // Dispatch each line independently. We don't await to allow
       // concurrent in-flight requests; handlers themselves are async

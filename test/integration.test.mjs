@@ -21,7 +21,7 @@ const gate = online ? false : `${SITE} unreachable — skipping integration`;
 
 test("live: lists, reads, and verifies against the real pinned key", { skip: gate }, async () => {
   const g = new Grimoire({ site: SITE }, noop);
-  const manifest = await g.preflight();
+  const { manifest } = await g.preflight();
   assert.ok(manifest.resources.length >= 1);
   const list = await g.list();
   const grim = list.find((r) => r.name === "grimoire");

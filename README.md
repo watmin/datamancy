@@ -40,37 +40,67 @@ manifest, and exposes each spell as an MCP resource. Your LLM client
 shows them in the resources list; selecting one loads its content
 (post-verification).
 
+## Pinning, versions, and self-hosting
+
+By default the server follows `latest` (live). The consumer chooses a
+stronger posture entirely via env vars in the same config `"env": { … }`:
+
+| Env var | Effect |
+|---|---|
+| `DATAMANCY_PIN=sha256:<manifest-hash>` | Freeze to one immutable, audited version. Trusts nothing but the hash. |
+| `DATAMANCY_VERSION=<label>` | Freeze to a version by its ISO8601 label (resolved by walking the signed chain). |
+| `DATAMANCY_SITE=<origin>` | Fetch from a self-hosted mirror — even raw git links. The pinned key still proves authenticity, so you host the bytes but can't forge them. |
+
+A version is the **whole grimoire frozen as one immutable snapshot** (like
+a container digest), identified by the manifest's own SHA-256. To discover
+what to pin, run the CLI:
+
+```bash
+npx -y datamancy current     # the current version + the exact DATAMANCY_PIN line to copy
+npx -y datamancy versions    # every version, newest first (walks the signed chain)
+```
+
+Pinning + self-hosting compose: `DATAMANCY_SITE` + `DATAMANCY_PIN` gives a
+frozen, air-gappable grimoire served from your own infra and still
+cryptographically verified against the pinned key.
+
 ## Trust model: living
 
-The pinned **Ed25519 public key** (`src/pinned-pubkey.ts`) is the only
-constant. It verifies *any* manifest the offline private key signs —
+The pinned **ECDSA P-256 public key** (`src/pinned-pubkey.ts`) is the only
+constant. It verifies *any* manifest the matching private key signs —
 including ones that don't exist yet — exactly the way TLS pins a CA or SSH
-pins a host key. So **the website is the content**: edit a spell, re-sign
-the manifest, push, and every consumer sees it on the next call. There is
-no manifest hash baked into this package and no republish-per-spell.
+pins a host key. The private key lives **non-exportably in AWS KMS** (it
+never touches a disk; every signature is logged in CloudTrail). So **the
+website is the content**: edit a spell, re-sign the manifest, push, and
+every consumer sees it on the next call. No manifest hash is baked into
+this package and there is no republish-per-spell.
 
 **Layer 1 — per-resource hashes.** The manifest lists a SHA-256 for every
 spell. Each fetched resource is hashed locally and compared; mismatch =
 the content is refused and a structured error reported.
 
-**Layer 2 — signed manifest.** The manifest is signed with an Ed25519
-detached signature (`manifest.json.sig`). Every load verifies it against
-the pinned public key before parsing. A manifest the key didn't sign is
-rejected and no content loads.
+**Layer 2 — signed manifest.** The manifest at
+`datamancy.dev/.well-known/mcp/manifest.json` is signed with an ECDSA
+P-256 detached signature alongside it at `manifest.json.sig`. Every load
+verifies it against the pinned public key before parsing — including a
+*malformed* signature, which is treated as a verification failure, never a
+transport blip. A manifest the key didn't sign is rejected and no content
+loads.
 
-**Stateless + always-fresh.** It's a static website, so this adapter holds
-no boot snapshot and has no reload command. Every list/read fetches the
-manifest fresh and verifies it, so content upgrades immediately. Boot does
-one preflight fetch+verify to fail fast on misconfiguration.
+**Stateless + always-fresh.** It's a static website, so serving holds no
+cache and there is no reload command. Every list/read fetches the manifest
+fresh and verifies it, so content upgrades immediately. Boot does one
+preflight fetch+verify (to fail fast on misconfiguration) which also seeds
+the last-known-good memo — that memo is a fallback, not a serving cache.
 
 **Resilience (write-only-on-verified memo).** Only verified content is ever
 remembered, so the memo can never hold anything forged. On a transient
 **transport** failure (timeout/DNS/5xx) the last-known-good is served with
 a quiet log. On a **verification** failure (bad signature/hash) the
 last-known-good is still served — the bad bytes are refused and never
-remembered — but the log is **loud**: a tamper is never silent. Warm
-fetches are bounded to ~3× the measured baseline latency, so a degraded
-network bails to last-known-good fast instead of hanging.
+remembered — but the log is **loud**: a tamper is never silent. Once a
+verified copy exists, fetches are bounded by a fixed ~5s backstop, so a
+genuinely stuck fetch bails to last-known-good rather than hanging.
 
 ## What this defeats
 
@@ -79,8 +109,8 @@ network bails to last-known-good fast instead of hanging.
 | Tamper one spell file | ✓ Layer 1 (hash mismatch on fetch) |
 | Tamper manifest + spell files together | ✓ Layer 2 (signature invalid) |
 | Full website compromise + replace everything | ✓ Layer 2 (attacker lacks the offline private key) |
-| Website-only compromise, *replay an old signed manifest* | ~ accepted: authentic but stale; low-stakes for a grimoire, closable later with a signed monotonic version, no freeze needed |
-| Website + offline private key both compromised | ✗ (the key is the anchor; protect it) |
+| Website-only compromise, *replay an old signed manifest* | ~ accepted by design: authentic but stale, low-stakes for a grimoire (a pinned consumer is immune — it froze a known-good hash) |
+| Website + KMS signing key both compromised | ✗ (the key is the anchor; it's non-exportable in KMS — protect the AWS account) |
 
 ## Architecture
 

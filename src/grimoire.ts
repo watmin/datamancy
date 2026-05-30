@@ -8,9 +8,9 @@
  *   PINNED              — freeze to one audited immutable version. Set
  *                         DATAMANCY_PIN=sha256:<manifest-hash> (strongest:
  *                         trusts nothing but the hash) or DATAMANCY_VERSION=
- *                         <gitsha> (resolved by walking the signed chain).
- *                         Fetches each spell's immutable `blob`. Loaded once,
- *                         then frozen — it can never change by construction.
+ *                         <label> (the ISO8601 version, resolved by walking
+ *                         the signed chain). Fetches each spell's immutable
+ *                         `blob`. Loaded once, then frozen by construction.
  *
  * Trust in both modes: every manifest is ECDSA P-256 verified against the
  * pinned public key; every spell body is SHA-256 verified before release.
@@ -32,27 +32,23 @@ import {
 import { fetchSignature, verifyManifestSignature } from "./signature.js";
 import { fetchAndVerify, type FetchedResource } from "./resources.js";
 import {
-  DatamancyError,
   isVerificationFailure,
   UnknownResourceError,
   BadPinError,
   VersionNotFoundError,
+  PinMismatchError,
 } from "./errors.js";
 
-/** A pinned manifest whose bytes don't hash to the requested pin. */
-export class PinMismatchError extends DatamancyError {
-  readonly severity = "verification";
-  constructor(
-    public expected: string,
-    public actual: string,
-    public url: string,
-  ) {
-    super(
-      `Pin mismatch at ${url}: expected sha256:${expected}, got ` +
-        `sha256:${actual}. The bytes served for this pinned version do not ` +
-        `match the requested hash — REFUSING.`,
-    );
-  }
+/** A manifest paired with the content-address (its SHA-256) that names it. */
+export interface VerifiedManifest {
+  hash: string;
+  manifest: Manifest;
+}
+
+/** The result of reading one spell: verified content + any set-change to surface. */
+export interface SpellRead {
+  fetched: FetchedResource;
+  setChange: SpellSetChange | null;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -97,12 +93,11 @@ export class Grimoire {
   private pinHash: string | null;
   private readonly version: string | null;
 
-  private manifestMemo: Manifest | null = null;
+  /** Last verified-good manifest (with its hash) — last-known-good fallback. */
+  private manifestMemo: VerifiedManifest | null = null;
   /** Pinned content is immutable, so it loads exactly once and freezes. */
-  private frozenManifest: Manifest | null = null;
+  private frozenManifest: VerifiedManifest | null = null;
   private contentMemo = new Map<string, FetchedResource>();
-  /** SHA-256 of the most recently loaded manifest — the current version id. */
-  loadedHash: string | null = null;
   /** Sorted spell-name set last seen — detects spell add/remove (live mode). */
   private knownSpellSet: string | null = null;
 
@@ -163,37 +158,23 @@ export class Grimoire {
    * fresh each call, memo fallback. Pinned: fetch the immutable snapshot
    * once, assert its hash equals the pin, then freeze it.
    */
-  private async loadManifest(): Promise<Manifest> {
+  private async loadManifest(): Promise<VerifiedManifest> {
     if (this.mode === "pinned" && this.frozenManifest) {
       return this.frozenManifest; // immutable — loaded once, never re-fetched
     }
-
     const url =
       this.mode === "pinned"
         ? this.snapshotManifestUrl(this.pinHash as string)
         : this.liveManifestUrl();
-    const sigUrl = `${url}.sig`;
     const signal = AbortSignal.timeout(
       this.timeoutFor(this.manifestMemo !== null),
     );
-
+    const expectHash = this.mode === "pinned" ? this.pinHash : null;
     try {
-      const [bytes, sig] = await Promise.all([
-        fetchManifestBytes(url, signal),
-        fetchSignature(sigUrl, signal),
-      ]);
-      verifyManifestSignature(bytes, sig, url, sigUrl);
-
-      const actual = createHash("sha256").update(bytes).digest("hex");
-      if (this.mode === "pinned" && actual !== this.pinHash) {
-        throw new PinMismatchError(this.pinHash as string, actual, url);
-      }
-      this.loadedHash = actual;
-
-      const manifest = parseManifest(bytes, url);
-      this.manifestMemo = manifest; // remember ONLY verified-good
-      if (this.mode === "pinned") this.frozenManifest = manifest; // freeze
-      return manifest;
+      const vm = await this.fetchOne(url, expectHash, signal);
+      this.manifestMemo = vm; // remember ONLY verified-good (manifest + its hash)
+      if (this.mode === "pinned") this.frozenManifest = vm; // freeze
+      return vm;
     } catch (err) {
       if (this.manifestMemo) {
         this.warnFallback(err, "manifest");
@@ -205,7 +186,7 @@ export class Grimoire {
 
   /** Current resource list, with uris resolved to the configured origin. */
   async list(): Promise<Resource[]> {
-    const manifest = await this.loadManifest();
+    const { manifest } = await this.loadManifest();
     // The client now sees the current set — advance the baseline.
     this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
     return manifest.resources.map((r) => ({ ...r, uri: this.resolve(r.uri) }));
@@ -216,16 +197,17 @@ export class Grimoire {
    * pinned mode fetches the immutable `blob`. Either way the content is
    * SHA-256 + size verified against the manifest entry.
    */
-  async read(
-    uri: string,
-  ): Promise<{ fetched: FetchedResource; setChange: SpellSetChange | null }> {
-    const manifest = await this.loadManifest();
+  async read(uri: string): Promise<SpellRead> {
+    const { manifest } = await this.loadManifest();
     // Detect a spell-SET change vs what the client last saw, then advance the
-    // baseline — both synchronous (no await between), so concurrent casts
-    // cannot lose or misattribute it. Returned as a value, never stashed in
-    // shared state for a caller to race over.
-    const setChange = Grimoire.spellSetDiff(this.knownSpellSet, manifest);
+    // baseline. Returned as a value (never stashed). The capture+advance is
+    // synchronous (no await between), so a concurrent cast can't tear it:
+    // whichever cast first observes a changed set reports it once and the rest
+    // see the advanced baseline (list_changed is a broadcast — which cast
+    // carries it is irrelevant).
+    const prevKey = this.knownSpellSet;
     this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
+    const setChange = Grimoire.spellSetDiff(prevKey, manifest);
 
     // The client passes the resolved (absolute) uri we exposed in list().
     const resource = manifest.resources.find(
@@ -258,25 +240,31 @@ export class Grimoire {
    * Startup: resolve a version pin to a hash (if needed), then load the
    * manifest once to fail fast on misconfiguration and seed the memo.
    */
-  async preflight(): Promise<Manifest> {
+  async preflight(): Promise<VerifiedManifest> {
     if (this.mode === "pinned" && this.pinHash === null && this.version) {
       this.pinHash = await this.resolveVersion(this.version);
       this.log(`resolved version ${this.version} → sha256:${this.pinHash}`);
     }
-    const manifest = await this.loadManifest();
-    this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
-    return manifest;
+    const vm = await this.loadManifest();
+    this.knownSpellSet = Grimoire.spellSetKey(vm.manifest.resources);
+    return vm;
   }
 
-  /** One verified hop: fetch + verify + hash + parse a manifest by URL. */
+  /**
+   * One verified hop: fetch the manifest + signature, verify the signature,
+   * hash the bytes (asserting against an expected pin if given), parse. The
+   * SINGLE home for the verify→hash→pin→parse sequence — loadManifest and the
+   * chain walk both go through here, so the trust core lives in one place.
+   */
   private async fetchOne(
     url: string,
     expectHash: string | null,
-  ): Promise<{ hash: string; manifest: Manifest }> {
+    signal?: AbortSignal,
+  ): Promise<VerifiedManifest> {
     const sigUrl = `${url}.sig`;
     const [bytes, sig] = await Promise.all([
-      fetchManifestBytes(url),
-      fetchSignature(sigUrl),
+      fetchManifestBytes(url, signal),
+      fetchSignature(sigUrl, signal),
     ]);
     verifyManifestSignature(bytes, sig, url, sigUrl);
     const hash = createHash("sha256").update(bytes).digest("hex");
@@ -333,7 +321,7 @@ export class Grimoire {
    */
   private async *walkChain(
     limit = Number.POSITIVE_INFINITY,
-  ): AsyncGenerator<{ hash: string; manifest: Manifest }> {
+  ): AsyncGenerator<VerifiedManifest> {
     let url = this.liveManifestUrl();
     let expect: string | null = null;
     for (let i = 0; i < limit; i++) {

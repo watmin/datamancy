@@ -58,7 +58,12 @@ export async function fetchSignature(
   if (!res.ok) {
     throw new SignatureFetchError(url, `HTTP ${res.status}`);
   }
-  return new Uint8Array(await res.arrayBuffer());
+  try {
+    return new Uint8Array(await res.arrayBuffer());
+  } catch (cause) {
+    // A body-read failure (aborted/truncated stream) is still transport.
+    throw new SignatureFetchError(url, cause);
+  }
 }
 
 /**
@@ -78,12 +83,22 @@ export function verifyManifestSignature(
   // ECDSA P-256 over SHA-256. dsaEncoding "der" matches KMS's output (an
   // ASN.1 SEQUENCE of r,s); node hashes manifestBytes with SHA-256 to
   // reproduce the digest KMS signed under ECDSA_SHA_256.
-  const ok = verify(
-    "sha256",
-    manifestBytes,
-    { key: pubkey, dsaEncoding: "der" },
-    signatureBytes,
-  );
+  //
+  // A *malformed* signature (not well-formed DER) makes node:crypto throw an
+  // OpenSSL decode error rather than returning false. Catch it and treat it as
+  // exactly what it is — a verification failure — so the loud-vs-quiet gate
+  // stays structural: a garbage .sig is a tamper, not a transport blip.
+  let ok = false;
+  try {
+    ok = verify(
+      "sha256",
+      manifestBytes,
+      { key: pubkey, dsaEncoding: "der" },
+      signatureBytes,
+    );
+  } catch {
+    ok = false;
+  }
   if (!ok) {
     throw new SignatureInvalidError(manifestUrl, signatureUrl);
   }

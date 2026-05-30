@@ -77,7 +77,13 @@ export async function fetchAndVerify(
     throw new ResourceFetchError(resource, `HTTP ${res.status}`);
   }
 
-  const bytes = new Uint8Array(await res.arrayBuffer());
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(await res.arrayBuffer());
+  } catch (cause) {
+    // A body-read failure (aborted/truncated stream) is still transport.
+    throw new ResourceFetchError(resource, cause);
+  }
 
   if (bytes.byteLength !== resource.size) {
     throw new SizeMismatchError(resource, resource.size, bytes.byteLength);

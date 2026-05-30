@@ -33,24 +33,27 @@ export interface Resource {
   description?: string;
 }
 
+/** The upstream site's identity block. */
+export interface ServerInfo {
+  name: string;
+  /** Friendly version label (ISO8601 at publish time). */
+  version: string;
+}
+
+/** The manifest's declared trust shape. */
+export interface TrustBlock {
+  algorithm: "SHA-256";
+  tier: number;
+  signed: boolean;
+}
+
 export interface Manifest {
   /** Document schema version — the FORMAT evolves on its own clock. */
   schemaVersion?: number;
-  serverInfo: {
-    name: string;
-    /** Friendly version label (ISO8601 at publish time). */
-    version: string;
-    /** Git short SHA the version was built from (traceability). */
-    commit?: string;
-  };
-  practitioner?: string;
+  serverInfo: ServerInfo;
   /** Content address of the previous manifest — the chain backpointer. */
   previous?: string | null;
-  trust: {
-    algorithm: "SHA-256";
-    tier: number;
-    signed: boolean;
-  };
+  trust: TrustBlock;
   resources: Resource[];
 }
 
@@ -136,7 +139,11 @@ export async function fetchManifestBytes(
   if (!res.ok) {
     throw new ManifestFetchError(url, `HTTP ${res.status}`);
   }
-  return new Uint8Array(await res.arrayBuffer());
+  try {
+    return new Uint8Array(await res.arrayBuffer());
+  } catch (cause) {
+    throw new ManifestFetchError(url, cause);
+  }
 }
 
 /**
@@ -147,8 +154,10 @@ export function parseManifest(bytes: Uint8Array, sourceUrl: string): Manifest {
   let data: unknown;
   try {
     data = JSON.parse(Buffer.from(bytes).toString("utf-8"));
-  } catch (cause) {
-    throw new ManifestFetchError(sourceUrl, `invalid JSON: ${cause}`);
+  } catch {
+    // Bytes that passed signature verification but aren't valid JSON are a
+    // corrupt trust root — a verification-class failure, not a transport blip.
+    throw new ManifestShapeError(sourceUrl);
   }
   if (!isManifest(data)) {
     throw new ManifestShapeError(sourceUrl);

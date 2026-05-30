@@ -129,16 +129,16 @@ async function runServer(): Promise<void> {
 
   // Preflight: fail fast if the live manifest is unreachable or its
   // signature is invalid at launch. NOT a cache — serving re-fetches.
-  const manifest = await grimoire.preflight();
+  const { manifest, hash } = await grimoire.preflight();
   log(
     `preflight OK: ${manifest.resources.length} resources, signature ` +
       `VERIFIED against pinned public key`,
   );
-  log(`version: ${manifest.serverInfo.version} (sha256:${grimoire.loadedHash})`);
+  log(`version: ${manifest.serverInfo.version} (sha256:${hash})`);
   if (pinHash || version) {
-    log(`frozen at sha256:${grimoire.loadedHash} — immutable`);
+    log(`frozen at sha256:${hash} — immutable`);
   } else {
-    log(`to FREEZE this grimoire: DATAMANCY_PIN=sha256:${grimoire.loadedHash}`);
+    log(`to FREEZE this grimoire: DATAMANCY_PIN=sha256:${hash}`);
   }
 
   const server = createMcpServer({

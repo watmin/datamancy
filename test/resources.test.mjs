@@ -29,14 +29,19 @@ test("returns verified content when hash + size match", async () => {
   assert.equal(r.text, body.toString());
 });
 
-test("fetches the url override (immutable blob) when given", async () => {
+test("fetches the url override (immutable blob) and returns the verified content", async () => {
   let seen;
   globalThis.fetch = async (url) => {
     seen = String(url);
     return new Response(body, { status: 200 });
   };
-  await fetchAndVerify(resource, undefined, `https://mirror.internal/blobs/sha256/${sha256}`);
-  assert.match(seen, /mirror\.internal\/blobs/);
+  const r = await fetchAndVerify(
+    resource,
+    undefined,
+    `https://mirror.internal/blobs/sha256/${sha256}`,
+  );
+  assert.match(seen, /mirror\.internal\/blobs/); // fetched from the override
+  assert.equal(r.text, body.toString()); // and the verified content came back
 });
 
 test("rejects on hash mismatch (same size, different bytes) — tamper", async () => {

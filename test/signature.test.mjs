@@ -39,3 +39,13 @@ test("rejects a signature made by a different key", () => {
     SignatureInvalidError,
   );
 });
+
+test("a MALFORMED (non-DER) signature is a SignatureInvalidError, not a native throw", () => {
+  // node:crypto throws an OpenSSL decode error on garbage DER; it must be
+  // caught and surfaced as a verification failure so a tamper stays LOUD.
+  const garbage = Buffer.from("this is not a DER-encoded ECDSA signature");
+  assert.throws(
+    () => verifyManifestSignature(data, garbage, "m", "s", publicKey),
+    SignatureInvalidError,
+  );
+});

@@ -44,11 +44,15 @@ not KMS.
 
 **2. Clean — delete the malicious files** (this is the actual recovery). Revert
 the channel to the last known-good bytes, which are already signed and sitting
-in git history:
+in git history. This is the **content repo** `github.com/watmin/datamancy.dev`
+(NOT the `datamancy` npm-package repo) — your local clone of it:
 ```bash
-cd datamancy.dev
-git revert <bad-commit>            # or: git reset --hard <good-commit> && force-push
-git push                            # Cloudflare redeploys; live consumers get good content next fetch
+cd path/to/datamancy.dev          # the content/channel repo, not the npm package
+# identify the bad commit(s): the publishes you did NOT make (check the dates/
+# authors against your own records + the CloudTrail kms:Sign timeline from step 1)
+git log --oneline -20
+git revert <bad-commit>            # or: git reset --hard <last-good-commit> && git push --force
+git push                          # Cloudflare redeploys; live consumers get good content next fetch
 ```
 
 **3. Close — remediate the account** so they can't re-post. Rotate the
