@@ -1,7 +1,7 @@
 # datamancy
 
 A cryptographically verifiable static MCP server backed by
-[datamancy.dev](https://datamancy.dev). Every spell content is SHA-256
+[datamancy.dev](https://datamancy.dev). Every spell's content is SHA-256
 verified before any prompt reaches the LLM.
 
 ## What this is
@@ -49,7 +49,22 @@ stronger posture entirely via env vars in the same config `"env": { … }`:
 |---|---|
 | `DATAMANCY_PIN=sha256:<manifest-hash>` | Freeze to one immutable, audited version. Trusts nothing but the hash. |
 | `DATAMANCY_VERSION=<label>` | Freeze to a version by its ISO8601 label (resolved by walking the signed chain — the 100 most recent; pin older versions by exact hash). |
-| `DATAMANCY_SITE=<origin>` | Fetch from a self-hosted mirror — even raw git links. The pinned key still proves authenticity, so you host the bytes but can't forge them. |
+| `DATAMANCY_SITE=<origin>` | Fetch from a self-hosted mirror that serves the files **directly** — not a host that 3xx-redirects (the kernel refuses redirects; see the contract). The pinned key still proves authenticity, so you host the bytes but can't forge them. |
+
+To freeze a posture, add an `"env"` block to the same config — e.g. pin an
+exact version:
+
+```json
+{
+  "mcpServers": {
+    "datamancy": {
+      "command": "npx",
+      "args": ["-y", "datamancy"],
+      "env": { "DATAMANCY_PIN": "sha256:<manifest-hash>" }
+    }
+  }
+}
+```
 
 A version is the **whole grimoire frozen as one immutable snapshot** (like
 a container digest), identified by the manifest's own SHA-256. To discover
@@ -66,8 +81,8 @@ cryptographically verified against the pinned key.
 
 ## Trust model: living
 
-The pinned **ECDSA P-256 public key** (`src/pinned-pubkey.ts`) is the only
-constant. It verifies *any* manifest the matching private key signs —
+The pinned **ECDSA P-256 public key** (`dist/pinned-pubkey.js` as installed;
+`src/pinned-pubkey.ts` in the git source) is the only constant. It verifies *any* manifest the matching private key signs —
 including ones that don't exist yet — exactly the way TLS pins a CA or SSH
 pins a host key. The private key lives **non-exportably in AWS KMS** (it
 never touches a disk; every signature is logged in CloudTrail). So **the

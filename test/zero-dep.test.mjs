@@ -6,16 +6,12 @@
 // into a RED BUILD before a tag can ever be cut.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-const pkg = JSON.parse(
-  readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"),
-    "utf-8",
-  ),
-);
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf-8"));
 
 test("the kernel has ZERO runtime dependencies (the whole trust posture)", () => {
   const deps = Object.keys(pkg.dependencies || {});
@@ -30,5 +26,35 @@ test("the kernel does not depend on ITSELF (no recursive self-reference)", () =>
   assert.ok(
     !(pkg.dependencies && pkg.dependencies[pkg.name]),
     "self-dependency detected — the zero-dep kernel must never depend on itself",
+  );
+});
+
+test("the COMPILED dist imports only node: builtins + relative paths (zero-dep in FACT)", () => {
+  // The headline is "every line of the trust path lives in this repo." Guard it
+  // at the IMPORT level, not just package.json: a bare specifier in dist would
+  // be a runtime dependency that ships green if it weren't also added to
+  // package.json. This makes the headline self-enforcing.
+  const distDir = join(ROOT, "dist");
+  const offenders = [];
+  for (const file of readdirSync(distDir).filter((f) => f.endsWith(".js"))) {
+    const src = readFileSync(join(distDir, file), "utf-8");
+    for (const m of src.matchAll(
+      /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["']([^"']+)["']/g,
+    )) {
+      const spec = m[1];
+      if (
+        !spec.startsWith("node:") &&
+        !spec.startsWith("./") &&
+        !spec.startsWith("../") &&
+        !spec.startsWith("/")
+      ) {
+        offenders.push(`${file}: ${spec}`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `dist must import only node: builtins + relative paths; bare specifiers found: ${offenders.join(", ")}`,
   );
 });

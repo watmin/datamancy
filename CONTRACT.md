@@ -83,11 +83,12 @@ rejection) — never a silent misread.
    optional: an absent `epoch` would bypass rollback protection, an absent
    `schemaVersion` would be silently assumed to be major 1, and an absent
    `previous` would make the chain root ambiguous. Omitting any → refusal.
-3b. **`epoch` MUST strictly increase with every published `latest`.** The
-   consumer refuses a live `latest` whose `epoch` regressed below the highest it
-   verified this session (rollback protection). The generator enforces this at
-   the source (`epoch = max(now, prevEpoch + 1)`); a publisher must never hand-
-   author a non-increasing epoch.
+3b. **`epoch` MUST NOT regress across published `latest` manifests.** The
+   consumer refuses a live `latest` whose `epoch` dropped below the highest it
+   verified this session (rollback protection); an *equal* epoch is accepted (a
+   same-second re-publish). The generator goes further and makes each publish
+   *strictly* increase (`epoch = max(now, prevEpoch + 1)`); a publisher must
+   never hand-author a decreasing epoch.
 4. **Field *meaning* is frozen.** `sha256` is over the *exact bytes served*;
    `size` is those bytes' length; the body is **UTF-8 text**. You may not
    overload an existing field (e.g. make `sha256` mean "hash of the compressed
