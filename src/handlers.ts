@@ -8,7 +8,7 @@
  * that forwards to the real server's sendNotification.
  */
 
-import type { Grimoire } from "./grimoire.js";
+import type { Grimoire, SpellSetChange } from "./grimoire.js";
 import type { McpHandlers, ServerInfo } from "./mcp.js";
 
 export function createGrimoireHandlers(
@@ -17,11 +17,26 @@ export function createGrimoireHandlers(
   notify: (method: string) => void,
   log: (...args: unknown[]) => void,
 ): McpHandlers {
+  // Surface a spell-SET change: nudge the client to re-source the grimoire.
+  // Both list() and read() can reveal it (resources/list is the MCP refresh
+  // primitive), so the notice fires on whichever the client used — at point of
+  // use. (Only ever non-null in live mode; a frozen pin never changes its set.)
+  const surface = (setChange: SpellSetChange | null): void => {
+    if (!setChange) return;
+    log(
+      `update @ ${setChange.version}: spells added ` +
+        `[${setChange.added.join(", ") || "—"}], removed ` +
+        `[${setChange.removed.join(", ") || "—"}] — re-source the grimoire.`,
+    );
+    notify("notifications/resources/list_changed");
+  };
+
   return {
     serverInfo,
 
     listResources: async () => {
-      const resources = await grimoire.list();
+      const { resources, setChange } = await grimoire.list();
+      surface(setChange);
       return {
         resources: resources.map((r) => ({
           uri: r.uri,
@@ -36,17 +51,7 @@ export function createGrimoireHandlers(
 
     readResource: async ({ uri }) => {
       const { fetched, setChange } = await grimoire.read(uri);
-      // If this cast revealed a spell-SET change since the client last listed,
-      // nudge it to re-source the grimoire — the notice lands at point of use.
-      // (Only ever non-null in live mode; a frozen pin never changes its set.)
-      if (setChange) {
-        log(
-          `update @ ${setChange.version}: spells added ` +
-            `[${setChange.added.join(", ") || "—"}], removed ` +
-            `[${setChange.removed.join(", ") || "—"}] — re-source the grimoire.`,
-        );
-        notify("notifications/resources/list_changed");
-      }
+      surface(setChange);
       // Echo the uri the client REQUESTED — grimoire.read only accepts a uri
       // that exactly resolves to a manifest resource, so this is provably that
       // resource, and it keeps list() and read() agreeing on the identifier

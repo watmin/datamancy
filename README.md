@@ -129,9 +129,7 @@ Compute it yourself and compare (the `npm install` makes the package importable
 
 ```bash
 npm install datamancy
-node --input-type=module -e 'import{createPublicKey,createHash}from"node:crypto";\
-import{PINNED_PUBKEY_PEM}from"datamancy/pinned-pubkey";\
-console.log(createHash("sha256").update(createPublicKey({key:PINNED_PUBKEY_PEM,format:"pem"}).export({type:"spki",format:"der"})).digest("hex"))'
+node --input-type=module -e 'import {createPublicKey, createHash} from "node:crypto"; import {PINNED_PUBKEY_PEM} from "datamancy/pinned-pubkey"; const der = createPublicKey({key: PINNED_PUBKEY_PEM, format: "pem"}).export({type: "spki", format: "der"}); console.log(createHash("sha256").update(der).digest("hex"))'
 ```
 
 Cross-check that fingerprint against independent channels before relying on the

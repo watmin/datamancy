@@ -54,6 +54,13 @@ export interface SpellRead {
   setChange: SpellSetChange | null;
 }
 
+/** The result of listing: the resolved resources + any set-change to surface,
+ *  so a client re-sourcing via resources/list gets the list_changed nudge too. */
+export interface SpellList {
+  resources: Resource[];
+  setChange: SpellSetChange | null;
+}
+
 // Timeout policy. Cold start (no fallback) gets a generous budget; once a
 // verified memo exists, a fetch is bounded so a genuinely STUCK one bails to
 // last-known-good. A FIXED, generous bound — not a per-fetch guess derived
@@ -225,12 +232,32 @@ export class Grimoire {
     }
   }
 
-  /** Current resource list, with uris resolved to the configured origin. */
-  async list(): Promise<Resource[]> {
+  /** Current resource list (uris resolved to the configured origin) PLUS any
+   *  spell-SET change since the client last observed. resources/list is the MCP
+   *  refresh primitive — a client re-sources through it — so the list_changed
+   *  nudge must fire here too, not only on read(); otherwise a list that
+   *  straddles an upstream change silently eats it. */
+  async list(): Promise<SpellList> {
     const { manifest } = await this.loadManifest();
-    // The client now sees the current set — advance the baseline.
+    const setChange = this.observeSetChange(manifest);
+    return {
+      resources: manifest.resources.map((r) => ({
+        ...r,
+        uri: this.resolve(r.uri),
+      })),
+      setChange,
+    };
+  }
+
+  /** Observe the spell-SET change vs the last-known baseline, advancing it. Fully
+   *  synchronous (no await between read, advance, diff) so concurrent casts can't
+   *  tear it — whichever observes a changed set reports it once and the rest see
+   *  the advanced baseline. Shared by list() and read() so the nudge fires on
+   *  whichever call the client uses to re-source. */
+  private observeSetChange(manifest: Manifest): SpellSetChange | null {
+    const prevKey = this.knownSpellSet;
     this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
-    return manifest.resources.map((r) => ({ ...r, uri: this.resolve(r.uri) }));
+    return Grimoire.spellSetDiff(prevKey, manifest);
   }
 
   /**
@@ -240,15 +267,9 @@ export class Grimoire {
    */
   async read(uri: string): Promise<SpellRead> {
     const { manifest } = await this.loadManifest();
-    // Detect a spell-SET change vs what the client last saw, then advance the
-    // baseline. Returned as a value (never stashed). The capture+advance is
-    // synchronous (no await between), so a concurrent cast can't tear it:
-    // whichever cast first observes a changed set reports it once and the rest
-    // see the advanced baseline (list_changed is a broadcast — which cast
-    // carries it is irrelevant).
-    const prevKey = this.knownSpellSet;
-    this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
-    const setChange = Grimoire.spellSetDiff(prevKey, manifest);
+    // Detect a spell-SET change vs what the client last saw (and advance the
+    // baseline) — shared with list() so the nudge fires on either path.
+    const setChange = this.observeSetChange(manifest);
 
     // The client passes the resolved (absolute) uri we exposed in list().
     const resource = manifest.resources.find(

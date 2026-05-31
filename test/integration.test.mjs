@@ -23,7 +23,7 @@ test("live: lists, reads, and verifies against the real pinned key", { skip: gat
   const g = new Grimoire({ site: SITE }, noop);
   const { manifest } = await g.preflight();
   assert.ok(manifest.resources.length >= 1);
-  const list = await g.list();
+  const { resources: list } = await g.list();
   const grim = list.find((r) => r.name === "grimoire");
   assert.ok(grim, "grimoire spell present");
   const { fetched } = await g.read(grim.uri);

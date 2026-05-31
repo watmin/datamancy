@@ -68,9 +68,9 @@ test("a regressed epoch is REFUSED loud; the memo keeps the newer manifest", asy
   const c = logCollector();
   const g = live(c.log);
   await g.preflight(); // newer (epoch 2000) → high-water 2000
-  assert.equal((await g.list()).length, 2);
+  assert.equal((await g.list()).resources.length, 2);
   serve = older; // mirror replays the stale (epoch 1000) manifest as latest
-  const list = await g.list();
+  const { resources: list } = await g.list();
   assert.equal(list.length, 2, "served last-known-good (newer), NOT the rollback");
   assert.ok(c.loud(), "logged LOUD — a rollback is not silent");
   assert.ok(!c.quiet(), "not misclassified as transport");
@@ -82,13 +82,13 @@ test("a higher epoch ADVANCES the high-water mark — a later regression to a on
   const g = live(c.log);
   await g.preflight(); // accept epoch 2000 → high-water 2000
   serve = evenNewer; // 3000
-  assert.equal((await g.list()).length, 2); // accepted → high-water ADVANCES to 3000
+  assert.equal((await g.list()).resources.length, 2); // accepted → high-water ADVANCES to 3000
   // Same session: epoch 2000 was fine moments ago, but the mark advanced to
   // 3000, so a replay of 2000 is now a refused rollback (this is the half the
   // preflight-baseline tests don't prove — that the mark actually moves).
   serve = newer; // 2000
   assert.equal(
-    (await g.list()).length,
+    (await g.list()).resources.length,
     2,
     "served last-known-good (3000), NOT the now-stale 2000",
   );
@@ -110,11 +110,15 @@ test("concurrent loads of a stale manifest NEVER poison the memo (order-independ
   serve = older; // every concurrent load now sees the stale manifest
   const results = await Promise.all([g.list(), g.list(), g.list(), g.list()]);
   for (const list of results) {
-    assert.equal(list.length, 2, "each concurrent call served last-known-good");
+    assert.equal(
+      list.resources.length,
+      2,
+      "each concurrent call served last-known-good",
+    );
   }
   // memo still newer — a final good fetch confirms it was never overwritten
   serve = newer;
-  assert.equal((await g.list()).length, 2);
+  assert.equal((await g.list()).resources.length, 2);
 });
 
 test("an OLDER manifest that RESOLVES LATER (slow) is still rejected", async () => {
@@ -125,7 +129,7 @@ test("an OLDER manifest that RESOLVES LATER (slow) is still rejected", async () 
   // rejects it on epoch, not on arrival timing.
   serve = older;
   delayMs = 40;
-  assert.equal((await g.list()).length, 2);
+  assert.equal((await g.list()).resources.length, 2);
 });
 
 test("pinned mode is EXEMPT from the rollback check (you chose an exact version)", async () => {
@@ -141,7 +145,7 @@ test("pinned mode is EXEMPT from the rollback check (you chose an exact version)
   };
   const g = new Grimoire({ site: SITE, pinHash, verifyKey: publicKey }, () => {});
   await assert.doesNotReject(() => g.preflight()); // low epoch, but pinned → no rollback gate
-  assert.equal((await g.list()).length, 1);
+  assert.equal((await g.list()).resources.length, 1);
 });
 
 test("a manifest with NO epoch is REJECTED — the gate can never be bypassed", async () => {

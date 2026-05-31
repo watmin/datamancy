@@ -70,20 +70,6 @@ export function installFetch(routeFn) {
   };
 }
 
-/**
- * Routes for a single live manifest (+ detached signature) and one content
- * body served at any other URL. `manifest` is signed with the throwaway key.
- */
-export function singleManifestRoutes({ manifest, content, sig }) {
-  const mBytes = bytesOf(manifest);
-  const mSig = sig ?? signBytes(mBytes);
-  return (u) => {
-    if (u.endsWith("/manifest.json.sig")) return bodyResponse(mSig);
-    if (u.endsWith("/manifest.json")) return bodyResponse(mBytes);
-    return bodyResponse(content ?? "");
-  };
-}
-
 /** Capture everything written to process.stdout during `fn()` as lines. */
 export async function captureStdout(fn) {
   const real = process.stdout.write.bind(process.stdout);

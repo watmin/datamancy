@@ -59,14 +59,14 @@ test("a TAMPERED manifest serves last-known-good LOUD, memo not poisoned", async
   const g = new Grimoire({ site: SITE, verifyKey: publicKey }, c.log);
   await g.preflight(); // seeds the good memo
   mode = "badsig";
-  const list = await g.list();
+  const { resources: list } = await g.list();
   assert.equal(list[0].name, "cernere", "served last-known-good resources");
   assert.ok(c.loud(), "logged LOUD on a verification failure");
   assert.ok(!c.quiet(), "did NOT misclassify the tamper as transport");
   // The memo must still be the GOOD one — a subsequent good fetch confirms it
   // was never overwritten by the tampered bytes.
   mode = "good";
-  assert.equal((await g.list())[0].name, "cernere");
+  assert.equal((await g.list()).resources[0].name, "cernere");
 });
 
 test("a TRANSPORT failure serves last-known-good QUIETLY (no scary log)", async () => {
@@ -75,7 +75,7 @@ test("a TRANSPORT failure serves last-known-good QUIETLY (no scary log)", async 
   const g = new Grimoire({ site: SITE, verifyKey: publicKey }, c.log);
   await g.preflight();
   mode = "down";
-  const list = await g.list();
+  const { resources: list } = await g.list();
   assert.equal(list[0].name, "cernere");
   assert.ok(c.quiet(), "logged transport fallback");
   assert.ok(!c.loud(), "did NOT cry tamper on a mere transport blip");
@@ -92,7 +92,7 @@ test("self-host: a relative manifest uri resolves to the configured origin", asy
     return bodyResponse("spell body");
   };
   const g = new Grimoire({ site: MIRROR, verifyKey: publicKey }, () => {});
-  const list = await g.list();
+  const { resources: list } = await g.list();
   assert.equal(list[0].uri, `${MIRROR}/cernere/SKILL.md`);
   const { fetched } = await g.read(`${MIRROR}/cernere/SKILL.md`);
   assert.equal(fetched.text, "spell body");

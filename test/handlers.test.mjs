@@ -13,10 +13,13 @@ const ABS = "https://datamancy.dev/cernere/SKILL.md";
  *  deliberately different from the absolute uri the client requests. */
 function fakeGrimoire({ setChange = null } = {}) {
   return {
-    list: async () => [
-      { uri: ABS, name: "cernere", mimeType: "text/markdown" },
-      { uri: `${ABS}2`, name: "withDesc", mimeType: "text/markdown", description: "custom" },
-    ],
+    list: async () => ({
+      resources: [
+        { uri: ABS, name: "cernere", mimeType: "text/markdown" },
+        { uri: `${ABS}2`, name: "withDesc", mimeType: "text/markdown", description: "custom" },
+      ],
+      setChange,
+    }),
     read: async (uri) => ({
       fetched: {
         resource: { uri: "cernere/SKILL.md", mimeType: "text/markdown" },
@@ -55,6 +58,16 @@ test("a spell-SET change fires the list_changed nudge + a log", async () => {
   await handlers.readResource({ uri: ABS });
   assert.deepEqual(notified, ["notifications/resources/list_changed"]);
   assert.ok(logs.some((l) => /nova/.test(l) && /re-source/.test(l)));
+});
+
+test("listResources ALSO fires the nudge — the dominant refresh path (resources/list)", async () => {
+  // The third-assault fix: a client re-sourcing via resources/list (the MCP
+  // refresh primitive) must get list_changed too, not only one that reads.
+  const { handlers, notified } = build(
+    fakeGrimoire({ setChange: { version: "v3", added: ["arx"], removed: [] } }),
+  );
+  await handlers.listResources();
+  assert.deepEqual(notified, ["notifications/resources/list_changed"]);
 });
 
 test("no set change → NO notification (a content edit must not nudge)", async () => {
