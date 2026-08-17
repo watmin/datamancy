@@ -14,7 +14,6 @@
 import { DatamancyError } from "./errors.js";
 import {
   readCappedBody,
-  BodyTooLargeError,
   MAX_MANIFEST_BYTES,
   MAX_RESOURCE_BYTES,
 } from "./http.js";
@@ -94,14 +93,29 @@ export interface Manifest {
 /** A lowercase hex SHA-256 (64 chars). Shared so pin + hash checks agree. */
 export const HEX64 = /^[0-9a-f]{64}$/;
 
-/** True iff `path` is a string that resolves as a URL (absolute or relative).
- *  Validating here means a malformed uri/blob fails the shape check (a
- *  verification-class ManifestShapeError) before resolve() ever sees it. */
+/**
+ * True iff `path` is an ORIGIN-RELATIVE reference — one that resolves as a URL
+ * and carries no scheme or authority of its own.
+ *
+ * Relativity is not a stylistic preference; it is the premise self-hosting
+ * rests on. An operator who sets DATAMANCY_SITE to their own host is promised
+ * an air-gappable grimoire, and that promise holds only while every `uri` and
+ * `blob` resolves against the origin THEY chose. A signed manifest that wrote
+ * absolute URLs would be perfectly well-formed, pass every other gate, and
+ * silently send an air-gapped machine back out to the public origin — reporting
+ * the bytes as verified, logging nothing, failing nowhere.
+ *
+ * So the premise is enforced here rather than assumed: an absolute reference is
+ * refused as a shape error at the publisher's build, not discovered as egress on
+ * the consumer's isolated network.
+ */
 function resolves(path: unknown): path is string {
   if (typeof path !== "string") return false;
   try {
-    new URL(path, "https://x/");
-    return true;
+    // A relative reference inherits the base origin; an absolute one replaces
+    // it. Comparing origins is what tells the two apart.
+    return new URL(path, "https://origin.invalid/").origin ===
+      "https://origin.invalid";
   } catch {
     return false;
   }
@@ -112,6 +126,10 @@ function isResource(x: unknown): x is Resource {
   const r = x as Record<string, unknown>;
   return (
     typeof r.name === "string" &&
+    // The one OPTIONAL field, but optional is not untyped: it is rendered
+    // verbatim into the catalog a model reads, so a non-string would arrive
+    // as "[object Object]" rather than be refused.
+    (r.description === undefined || typeof r.description === "string") &&
     resolves(r.uri) &&
     resolves(r.blob) &&
     typeof r.mimeType === "string" &&
@@ -139,6 +157,14 @@ function isManifest(x: unknown): x is Manifest {
   if (typeof t.signed !== "boolean") return false;
   if (!Array.isArray(m.resources)) return false;
   if (!m.resources.every(isResource)) return false;
+  // Resource NAMES must be unique. `name` addresses a spell (the `fetch_spell`
+  // tool resolves by it), so duplicates would make array ORDER decide which
+  // bytes a caller receives — and reordering resources is something the
+  // contract explicitly permits the website to do freely. Without this gate a
+  // legal reorder silently changes content; refusing here keeps "lookup is by
+  // name, never by position" true instead of merely intended.
+  const names = new Set(m.resources.map((r) => r.name));
+  if (names.size !== m.resources.length) return false;
   // Chain/format fields are REQUIRED — no silent-assumption bypass. Every
   // manifest must DECLARE its format major, its chain position (null at
   // genesis), and its freshness stamp.
@@ -174,14 +200,16 @@ function isManifest(x: unknown): x is Manifest {
 
 export class ManifestFetchError extends DatamancyError {
   readonly severity = "transport";
-  constructor(public url: string, public cause?: unknown) {
+  readonly audience = "operator";
+  constructor(url: string, cause: unknown) {
     super(`Failed to fetch manifest from ${url}: ${cause}`);
   }
 }
 
 export class ManifestShapeError extends DatamancyError {
   readonly severity = "verification";
-  constructor(public url: string) {
+  readonly audience = "operator";
+  constructor(url: string) {
     super(
       `Manifest at ${url} did not validate against expected shape. ` +
         `Refusing to use it — the trust root is corrupt.`,
@@ -194,10 +222,11 @@ export class ManifestSchemaError extends DatamancyError {
   // serves last-known-good LOUD (and a cold boot fails fast) — either way the
   // operator is told to upgrade rather than fed a guessed-at interpretation.
   readonly severity = "verification";
+  readonly audience = "operator";
   constructor(
-    public url: string,
+    url: string,
     public declared: number,
-    public supported: number,
+    supported: number,
   ) {
     super(
       `Manifest at ${url} declares schemaVersion ${declared}, but this ` +
@@ -234,13 +263,21 @@ export async function fetchManifestBytes(
   }
   try {
     // Bounded read: a manifest larger than the ceiling can't OOM the process.
-    return await readCappedBody(res, MAX_MANIFEST_BYTES);
+    // Overflow is TRANSPORT here — we never obtained usable bytes, so there is
+    // nothing to have verified.
+    return await readCappedBody(
+      res,
+      MAX_MANIFEST_BYTES,
+      (cap, read) =>
+        new ManifestFetchError(
+          url,
+          `body exceeded the ${cap}-byte ceiling (read at least ${read})`,
+        ),
+    );
   } catch (cause) {
-    // Over-long or read failure are both transport (we haven't verified yet).
-    if (cause instanceof BodyTooLargeError) {
-      throw new ManifestFetchError(url, cause.message);
-    }
-    throw new ManifestFetchError(url, cause);
+    throw cause instanceof ManifestFetchError
+      ? cause
+      : new ManifestFetchError(url, cause);
   }
 }
 

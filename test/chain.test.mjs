@@ -102,3 +102,60 @@ test("a snapshot whose bytes don't hash to the `previous` pointer is REJECTED (t
   restore = installFetch(chainRoutes(tampered));
   await assert.rejects(() => live().listVersions(), PinMismatchError);
 });
+
+// ── A BROKEN chain: a listing truncates; a lookup and a tamper do not ────────
+//
+// Measured against the canonical origin, not imagined: `datamancy versions`
+// exited 1 and printed NOTHING because one snapshot 17 hops back returned 404.
+// Seventeen versions had already been signature-verified and were discarded.
+// A listing that answers "HTTP 404" where it could answer "here are the 17 that
+// verify, and your chain is broken below them" is the wrong shape for a listing.
+
+/** Serve the live manifest but 404 the older snapshot — a dangling backpointer,
+ *  exactly the shape the real origin is in. */
+const brokenChain = () =>
+  installFetch((u) => {
+    if (u.includes(`/manifests/${olderHash}/`)) return null; // 404
+    if (u.endsWith("/.well-known/mcp/manifest.json")) return newerBytes;
+    if (u.endsWith("/.well-known/mcp/manifest.json.sig")) return signBytes(newerBytes);
+    return "x";
+  });
+
+test("listVersions TRUNCATES on a dangling backpointer and says so LOUDLY", async () => {
+  const lines = [];
+  restore = brokenChain();
+  const g = new Grimoire({ site: SITE, verifyKey: publicKey }, (...a) =>
+    lines.push(a.map(String).join(" ")),
+  );
+  const versions = await g.listVersions();
+  assert.equal(versions.length, 1, "the one hop that verified is still returned");
+  assert.equal(versions[0].version, NEW_V);
+  assert.ok(
+    lines.some((l) => /chain BROKEN after 1 version/.test(l)),
+    `the operator must be told the chain is broken, not just handed a short list: ${lines}`,
+  );
+});
+
+test("listVersions still THROWS when the very first hop fails — no partial answer", async () => {
+  // "The origin is unreachable" must never render as "no versions exist".
+  restore = installFetch(() => null);
+  const g = new Grimoire({ site: SITE, verifyKey: publicKey }, noop);
+  await assert.rejects(() => g.listVersions());
+});
+
+test("listVersions still THROWS on a hash-broken hop — a tamper is never truncated", async () => {
+  // The distinction the truncation rests on: transport failures degrade,
+  // verification failures do not. A short list is not an answer to a tamper.
+  restore = installFetch(chainRoutes(bytesOf(manifestFor([resourceFor("z", "z")]))));
+  const g = new Grimoire({ site: SITE, verifyKey: publicKey }, noop);
+  await assert.rejects(() => g.listVersions(), PinMismatchError);
+});
+
+test("a version LOOKUP still throws on a broken chain — it cannot prove absence", async () => {
+  // resolveVersion deliberately does not share the truncation: a walk that
+  // stopped early has not shown the label is missing, only that it did not
+  // reach it. Reporting VersionNotFound there would be a lie.
+  restore = brokenChain();
+  const g = new Grimoire({ site: SITE, version: OLD_V, verifyKey: publicKey }, noop);
+  await assert.rejects(() => g.preflight());
+});

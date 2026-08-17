@@ -25,13 +25,26 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # package.json declares `engines.node: ">=20"`, and this suite is the sole
+    # publish gate — so the FLOOR has to be one of the versions it runs on.
+    # Testing only on 22 made ">=20" an untested claim: any API newer than 20
+    # would have shipped green. Both ends of the declared range run here.
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
       - run: npm ci
+      # The network-gated tests are the ONLY coverage of verified signed
+      # content — and of the spawned-process claim 1.1.0 exists for. Letting
+      # them skip here would green the publish gate without them.
       - run: npm test # build + the full suite — the publish gate
+        env:
+          DATAMANCY_REQUIRE_NETWORK: "1"
 
   publish:
     needs: test # unreachable until the suite is green
@@ -41,11 +54,19 @@ jobs:
       contents: read
       id-token: write # OIDC: tokenless auth + provenance signing
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: npm install -g npm@latest # ensure OIDC-capable npm
+      # PINNED, like every other third-party input in this file. This line
+      # installs the code that performs the publish AND signs the Sigstore
+      # provenance attestation, inside the only job holding `id-token: write` —
+      # so it was the one unpinned input in the most privileged step. `@latest`
+      # is 12.x now; the workflow was validated on the 11 line. Trusted
+      # Publishing needs npm >= 11.5.1, which setup-node's bundled npm does not
+      # meet, so the install itself is required. Dependabot cannot see a version
+      # inside a `run:` line — bump this deliberately, after reading the diff.
+      - run: npm install -g npm@11.19.0 # OIDC-capable (Trusted Publishing >= 11.5.1)
       - run: npm ci
       - run: npm publish --provenance --access public

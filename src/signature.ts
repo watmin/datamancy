@@ -20,7 +20,7 @@
 import { createPublicKey, verify, type KeyObject } from "node:crypto";
 import { PINNED_PUBKEY_PEM } from "./pinned-pubkey.js";
 import { DatamancyError } from "./errors.js";
-import { readCappedBody, BodyTooLargeError, MAX_SIGNATURE_BYTES } from "./http.js";
+import { readCappedBody, MAX_SIGNATURE_BYTES } from "./http.js";
 
 const PUBKEY: KeyObject = createPublicKey({
   key: PINNED_PUBKEY_PEM,
@@ -29,14 +29,16 @@ const PUBKEY: KeyObject = createPublicKey({
 
 export class SignatureFetchError extends DatamancyError {
   readonly severity = "transport";
-  constructor(public url: string, public cause?: unknown) {
+  readonly audience = "operator";
+  constructor(url: string, cause: unknown) {
     super(`Failed to fetch signature from ${url}: ${cause}`);
   }
 }
 
 export class SignatureInvalidError extends DatamancyError {
   readonly severity = "verification";
-  constructor(public manifestUrl: string, public signatureUrl: string) {
+  readonly audience = "operator";
+  constructor(manifestUrl: string, signatureUrl: string) {
     super(
       `Signature verification FAILED. ` +
         `Manifest: ${manifestUrl}. Signature: ${signatureUrl}. ` +
@@ -64,13 +66,21 @@ export async function fetchSignature(
   try {
     // A detached P-256 DER signature is ~72 bytes; cap well above that so an
     // oversized "signature" body can't OOM the process before verification.
-    return await readCappedBody(res, MAX_SIGNATURE_BYTES);
+    // Overflow is TRANSPORT: an oversized "signature" body is bytes we never
+    // got to verify against, not bytes that failed verification.
+    return await readCappedBody(
+      res,
+      MAX_SIGNATURE_BYTES,
+      (cap, read) =>
+        new SignatureFetchError(
+          url,
+          `body exceeded the ${cap}-byte cap (read at least ${read})`,
+        ),
+    );
   } catch (cause) {
-    // Over-long or a body-read failure (aborted/truncated) are both transport.
-    if (cause instanceof BodyTooLargeError) {
-      throw new SignatureFetchError(url, cause.message);
-    }
-    throw new SignatureFetchError(url, cause);
+    throw cause instanceof SignatureFetchError
+      ? cause
+      : new SignatureFetchError(url, cause);
   }
 }
 

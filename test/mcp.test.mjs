@@ -12,12 +12,17 @@ import {
 import { captureStdout } from "./helpers.mjs";
 
 function mcp() {
+  // The FULL handler shape. A partial one is not a server: it type-checks in
+  // TS but these tests are .mjs and outside tsconfig's include, so a missing
+  // member here would surface only as a TypeError at request time.
   return createMcpServer({
-    serverInfo: { name: "datamancy", version: "1.0.0" },
+    serverInfo: { name: "datamancy", version: "1.1.0" },
     listResources: async () => ({ resources: [] }),
     readResource: async ({ uri }) => ({
       contents: [{ uri, mimeType: "text/markdown", text: "ok" }],
     }),
+    listSpells: async () => [{ type: "text", text: "a — alpha" }],
+    fetchSpell: async () => [{ type: "text", text: "ok" }],
   });
 }
 
@@ -65,8 +70,9 @@ test("ping → empty result", async () => {
   assert.deepEqual(r.result, {});
 });
 
-test("resources/read WITHOUT a uri → BadParams (InternalError envelope)", async () => {
+test("resources/read WITHOUT a uri → BadParams, carried as -32602 InvalidParams", async () => {
   const r = await call("resources/read", {});
+  assert.equal(r.error.code, -32602, "a malformed request is the CLIENT's fault");
   assert.match(r.error.message, /requires params\.uri/);
 });
 

@@ -11,9 +11,10 @@ const ABS = "https://datamancy.dev/cernere/SKILL.md";
 /** A fake grimoire exposing only what the handlers call. `setChange` is
  *  whatever read() should surface. Note resource.uri is the RAW relative path,
  *  deliberately different from the absolute uri the client requests. */
-function fakeGrimoire({ setChange = null } = {}) {
+function fakeGrimoire({ setChange = null, provenance = "verified" } = {}) {
   return {
     list: async () => ({
+      provenance,
       resources: [
         { uri: ABS, name: "cernere", mimeType: "text/markdown" },
         { uri: `${ABS}2`, name: "withDesc", mimeType: "text/markdown", description: "custom" },
@@ -25,8 +26,17 @@ function fakeGrimoire({ setChange = null } = {}) {
         resource: { uri: "cernere/SKILL.md", mimeType: "text/markdown" },
         text: "VERIFIED BODY",
       },
+      provenance,
       setChange,
       requested: uri,
+    }),
+    readByName: async (name) => ({
+      fetched: {
+        resource: { uri: `${name}/SKILL.md`, mimeType: "text/markdown" },
+        text: "VERIFIED BODY",
+      },
+      provenance,
+      setChange,
     }),
   };
 }
@@ -49,6 +59,28 @@ test("readResource echoes the REQUESTED uri, not the manifest's raw relative pat
   assert.equal(res.contents[0].uri, ABS); // absolute, as requested — not "cernere/SKILL.md"
   assert.equal(res.contents[0].text, "VERIFIED BODY");
   assert.equal(res.contents[0].mimeType, "text/markdown");
+});
+
+test("an UNKNOWN provenance discloses — the fail-safe direction", async () => {
+  // Not "verified" means say so. A grimoire that returned no provenance at all
+  // must not have its bytes passed off as fresh by default.
+  // Built WITHOUT the field, not with it set to undefined — a default
+  // parameter fires on undefined, so passing it explicitly would have tested
+  // the default rather than its absence.
+  const bare = {
+    list: async () => ({ resources: [], setChange: null }),
+    read: async () => ({
+      fetched: {
+        resource: { uri: "cernere/SKILL.md", mimeType: "text/markdown" },
+        text: "VERIFIED BODY",
+      },
+      setChange: null,
+    }),
+  };
+  const { handlers } = build(bare);
+  const res = await handlers.readResource({ uri: ABS });
+  assert.equal(res.contents.length, 2);
+  assert.match(res.contents[0].text, /could not be verified/);
 });
 
 test("a spell-SET change fires the list_changed nudge + a log", async () => {
@@ -81,6 +113,15 @@ test("listResources maps resolved uri/name/mimeType and supplies a description f
   const { resources } = await handlers.listResources();
   assert.equal(resources.length, 2);
   assert.equal(resources[0].uri, ABS);
-  assert.match(resources[0].description, /SHA-256 verified/); // fallback
+  assert.match(resources[0].description, /^Datamancy spell: /); // fallback
   assert.equal(resources[1].description, "custom"); // honored when present
+
+  // A FRESH catalog claims nothing about its own freshness. The fallback used
+  // to assert "(SHA-256 verified at fetch time)" — an affirmative that was
+  // also produced for rows served from the memo after the origin failed, and
+  // which no row can earn on its own behalf. Only the negative is disclosed.
+  for (const r of resources) {
+    assert.doesNotMatch(r.description, /verified at fetch time/);
+    assert.doesNotMatch(r.description, /could not be verified/);
+  }
 });

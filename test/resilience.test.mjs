@@ -15,6 +15,7 @@ import {
   resourceFor,
   bodyResponse,
   publicKey,
+  logCollector,
 } from "./helpers.mjs";
 
 const SITE = "https://test.invalid";
@@ -43,15 +44,6 @@ afterEach(() => {
   mode = "good";
 });
 
-function logCollector() {
-  const lines = [];
-  const log = (...a) => lines.push(a.map(String).join(" "));
-  return {
-    log,
-    loud: () => lines.some((l) => /VERIFICATION FAILED|scary/.test(l)),
-    quiet: () => lines.some((l) => /transport failure/.test(l)),
-  };
-}
 
 test("a TAMPERED manifest serves last-known-good LOUD, memo not poisoned", async () => {
   install();

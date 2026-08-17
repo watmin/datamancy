@@ -85,10 +85,22 @@ test("a non-numeric / non-finite epoch is refused as corrupt shape", () => {
     () => parse(manifestFor([resourceFor("a", "x")], { epoch: "soon" })),
     ManifestShapeError,
   );
-  assert.throws(
-    () => parse(manifestFor([resourceFor("a", "x")], { epoch: Infinity })),
-    ManifestShapeError,
-  );
+
+  // The non-finite case must be spliced in as RAW JSON, not passed as the JS
+  // value `Infinity`. `bytesOf` is `JSON.stringify`, which renders every
+  // non-finite number as `null` — so `{ epoch: Infinity }` never reached the
+  // finiteness guard at all; it was caught by the `typeof !== "number"` arm and
+  // the guard it names had no coverage. Deleting `!Number.isFinite(m.epoch)`
+  // left the whole suite green.
+  //
+  // `1e999` is the reachable form: JSON has no `Infinity` literal, but an
+  // over-range exponent parses to one. It is load-bearing rather than
+  // defensive — an accepted `epoch: Infinity` pins `highestEpoch` permanently,
+  // and every later legitimate manifest is then refused as a rollback forever.
+  const raw = JSON.stringify(manifestFor([resourceFor("a", "x")], { epoch: 1 }))
+    .replace('"epoch":1', '"epoch":1e999');
+  assert.equal(JSON.parse(raw).epoch, Infinity, "the fixture really carries a non-finite epoch");
+  assert.throws(() => parseManifest(Buffer.from(raw), URL_), ManifestShapeError);
 });
 
 // ── MUST NOT change without a new major: breaking shapes refuse LOUD ──

@@ -9,8 +9,9 @@
  * We implement only the server side: receive requests and notifications
  * on stdin, dispatch to registered handlers, write responses to stdout.
  * Notifications expect no response. Requests expect exactly one response
- * (result OR error, never both). Handler exceptions become error responses
- * with code = InternalError. Parse failures become error responses with
+ * (result OR error, never both). A handler exception becomes an error response
+ * carrying the code the thrown value declares (see CodedError) — InternalError
+ * only when it declares none. Parse failures become error responses with
  * id = null and code = ParseError.
  */
 
@@ -56,6 +57,32 @@ export const ErrorCodes = {
 export type RequestHandler = (params: unknown) => Promise<unknown>;
 export type NotificationHandler = (params: unknown) => Promise<void>;
 
+/**
+ * A handler error MAY declare the JSON-RPC code it should surface as.
+ *
+ * Declared here, in the framing layer that owns the wire, and satisfied
+ * structurally by whatever the handlers throw — so this layer never learns
+ * which error classes exist. Without it every throw flattened to
+ * InternalError, telling a client "the server broke" for what was its own
+ * malformed request; JSON-RPC 2.0 §5.1 reserves -32603 for a genuine
+ * server-side fault, and the MCP spec's worked example for an unknown tool is
+ * -32602.
+ */
+export interface CodedError {
+  /** Not `number`: only a code this layer actually defines. `42` is not a
+   *  JSON-RPC error code and should not type-check as one. */
+  readonly rpcCode: (typeof ErrorCodes)[keyof typeof ErrorCodes];
+}
+
+/** The code a thrown value asks for, else InternalError. A value that declares
+ *  nothing is, by definition, an internal fault. */
+function codeOf(err: unknown): number {
+  const declared = (err as Partial<CodedError> | null | undefined)?.rpcCode;
+  return typeof declared === "number" && Number.isInteger(declared)
+    ? declared
+    : ErrorCodes.InternalError;
+}
+
 export class StdioServer {
   private requestHandlers = new Map<string, RequestHandler>();
   private notificationHandlers = new Map<string, NotificationHandler>();
@@ -69,11 +96,13 @@ export class StdioServer {
     this.notificationHandlers.set(method, handler);
   }
 
-  /** Server-initiated notification (no id, no response expected). */
-  sendNotification(method: string, params?: unknown): void {
-    this.out.write(
-      JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }) + "\n",
-    );
+  /** Server-initiated notification (no id, no response expected).
+   *
+   *  No params: the only notification this server emits carries none, and an
+   *  optional parameter no caller ever supplies is a signature promising a
+   *  variation that does not exist. */
+  sendNotification(method: string): void {
+    this.out.write(JSON.stringify({ jsonrpc: "2.0", method, params: {} }) + "\n");
   }
 
   /**
@@ -107,10 +136,48 @@ export class StdioServer {
       return;
     }
 
+    // A JSON-RPC BATCH — an array of requests and/or notifications. MCP
+    // 2025-03-26 permits one on the stdio transport, and this server echoes
+    // that version back to any client that asks for it, so it must accept one:
+    // rejecting the array answered a two-request batch with a single
+    // InvalidRequest and left BOTH ids unanswered, hanging the client until its
+    // own timeout. (2024-11-05 never had batches and 2025-06-18 removed them
+    // again; accepting one on those revisions costs nothing, because a client
+    // that never sends one never reaches this branch.)
+    if (Array.isArray(msg)) {
+      if (msg.length === 0) {
+        this.sendError(null, ErrorCodes.InvalidRequest, "Invalid Request");
+        return;
+      }
+      const responses = (
+        await Promise.all(msg.map((m) => this.dispatch(m)))
+      ).filter((r): r is JsonRpcResult | JsonRpcErrorResponse => r !== null);
+      // An all-notification batch expects no reply at all — by spec, and
+      // writing an empty array instead would be a message the client must
+      // then decide how to ignore.
+      if (responses.length > 0) {
+        this.out.write(JSON.stringify(responses) + "\n");
+      }
+      return;
+    }
+
+    const response = await this.dispatch(msg);
+    if (response) this.writeMessage(response);
+  }
+
+  /**
+   * Turn ONE parsed message into its response, or null when it demands none (a
+   * notification). Returning the response rather than writing it is what lets a
+   * batch collect several into one array — and it keeps single and batched
+   * messages on the identical code path, so the two can never disagree about
+   * what a given message means.
+   */
+  private async dispatch(
+    msg: unknown,
+  ): Promise<JsonRpcResult | JsonRpcErrorResponse | null> {
     if (!isRequest(msg)) {
       const id = (msg as { id?: JsonRpcId } | null)?.id ?? null;
-      this.sendError(id, ErrorCodes.InvalidRequest, "Invalid Request");
-      return;
+      return this.errorMessage(id, ErrorCodes.InvalidRequest, "Invalid Request");
     }
 
     // Notification path: a notification is a request object WITHOUT an `id`
@@ -128,43 +195,52 @@ export class StdioServer {
           );
         }
       }
-      return;
+      return null;
     }
 
-    // Request path: dispatch, send exactly one response. id may be null here
-    // (a valid id) — echo it back as-is.
+    // Request path: dispatch, produce exactly one response. id may be null
+    // here (a valid id) — echo it back as-is.
     const id: JsonRpcId = msg.id ?? null;
     const handler = this.requestHandlers.get(msg.method);
     if (!handler) {
-      this.sendError(
+      return this.errorMessage(
         id,
         ErrorCodes.MethodNotFound,
         `Method not found: ${msg.method}`,
       );
-      return;
     }
 
     try {
-      const result = await handler(msg.params);
-      this.sendResult(id, result);
+      return { jsonrpc: "2.0", id, result: await handler(msg.params) };
     } catch (err) {
-      this.sendError(
+      return this.errorMessage(
         id,
-        ErrorCodes.InternalError,
+        codeOf(err),
         err instanceof Error ? err.message : String(err),
-        err instanceof Error
-          ? { name: err.name, stack: err.stack }
-          : undefined,
+        // The error's NAME, never its stack. A stack is Node's default shape
+        // for an Error and nobody chose to put it on this channel — it carries
+        // the absolute install path, which under `npx` is
+        // /home/<user>/.npm/_npx/<hash>/…, onto a wire MCP hosts routinely
+        // surface into model context. The operator's copy still goes to stderr,
+        // which is the audience a stack is for.
+        err instanceof Error ? { name: err.name } : undefined,
       );
     }
   }
 
-  private writeMessage(msg: JsonRpcResult | JsonRpcErrorResponse): void {
-    this.out.write(JSON.stringify(msg) + "\n");
+  private errorMessage(
+    id: JsonRpcId,
+    code: number,
+    message: string,
+    data?: unknown,
+  ): JsonRpcErrorResponse {
+    const body: JsonRpcErrorBody = { code, message };
+    if (data !== undefined) body.data = data;
+    return { jsonrpc: "2.0", id, error: body };
   }
 
-  private sendResult(id: JsonRpcId, result: unknown): void {
-    this.writeMessage({ jsonrpc: "2.0", id, result });
+  private writeMessage(msg: JsonRpcResult | JsonRpcErrorResponse): void {
+    this.out.write(JSON.stringify(msg) + "\n");
   }
 
   private sendError(
@@ -173,9 +249,7 @@ export class StdioServer {
     message: string,
     data?: unknown,
   ): void {
-    const body: JsonRpcErrorBody = { code, message };
-    if (data !== undefined) body.data = data;
-    this.writeMessage({ jsonrpc: "2.0", id, error: body });
+    this.writeMessage(this.errorMessage(id, code, message, data));
   }
 }
 

@@ -10,21 +10,23 @@
 import { createHash } from "node:crypto";
 import type { Resource } from "./manifest.js";
 import { DatamancyError } from "./errors.js";
-import { readCappedBody, BodyTooLargeError } from "./http.js";
+import { readCappedBody } from "./http.js";
 
 export class ResourceFetchError extends DatamancyError {
   readonly severity = "transport";
-  constructor(public resource: Resource, public cause?: unknown) {
+  readonly audience = "operator";
+  constructor(resource: Resource, cause: unknown) {
     super(`Failed to fetch resource ${resource.name} at ${resource.uri}: ${cause}`);
   }
 }
 
 export class HashMismatchError extends DatamancyError {
   readonly severity = "verification";
+  readonly audience = "operator";
   constructor(
-    public resource: Resource,
-    public expectedSha256: string,
-    public actualSha256: string,
+    resource: Resource,
+    expectedSha256: string,
+    actualSha256: string,
   ) {
     super(
       `Hash mismatch for resource "${resource.name}" at ${resource.uri}: ` +
@@ -36,10 +38,11 @@ export class HashMismatchError extends DatamancyError {
 
 export class SizeMismatchError extends DatamancyError {
   readonly severity = "verification";
+  readonly audience = "operator";
   constructor(
-    public resource: Resource,
-    public expectedSize: number,
-    public actualSize: number,
+    resource: Resource,
+    expectedSize: number,
+    actualSize: number,
   ) {
     super(
       `Size mismatch for resource "${resource.name}" at ${resource.uri}: ` +
@@ -51,7 +54,8 @@ export class SizeMismatchError extends DatamancyError {
 
 export class EncodingError extends DatamancyError {
   readonly severity = "verification";
-  constructor(public resource: Resource) {
+  readonly audience = "operator";
+  constructor(resource: Resource) {
     super(
       `Resource "${resource.name}" at ${resource.uri} is not valid UTF-8 text. ` +
         `Datamancy spells are UTF-8 text only; refusing to ship a lossy ` +
@@ -96,14 +100,19 @@ export async function fetchAndVerify(
     // Cap the read at the manifest's declared size: a body longer than
     // promised is a size mismatch, and capping means we never buffer an
     // unbounded body into memory (OOM-proof against a compromised origin).
-    bytes = await readCappedBody(res, resource.size);
+    // Overflow is VERIFICATION here, not transport — the origin served MORE
+    // than the signed manifest declared, which is the manifest and the bytes
+    // disagreeing. That routes to the loud half of the gate, and it is the
+    // reason overflow cannot carry one fixed class for every caller.
+    bytes = await readCappedBody(
+      res,
+      resource.size,
+      (_cap, read) => new SizeMismatchError(resource, resource.size, read),
+    );
   } catch (cause) {
-    // Over-long body → a size mismatch (verification); any other read failure
-    // (aborted/truncated stream) is transport.
-    if (cause instanceof BodyTooLargeError) {
-      throw new SizeMismatchError(resource, resource.size, cause.read);
-    }
-    throw new ResourceFetchError(resource, cause);
+    throw cause instanceof SizeMismatchError
+      ? cause
+      : new ResourceFetchError(resource, cause);
   }
 
   if (bytes.byteLength !== resource.size) {

@@ -2,9 +2,13 @@
  * The grimoire: a verifying client to datamancy.dev, in one of two postures
  * the CONSUMER chooses — not the publisher.
  *
- *   LIVE (default)      — follow the moving `latest` pointer. Stateless
- *                         always-fetch; content upgrades the instant the
- *                         website does. Fetches each spell's pretty `uri`.
+ *   LIVE (default)      — follow the moving `latest` pointer. No boot
+ *                         snapshot; always-fetch, so content upgrades the
+ *                         instant the website does. (Session state exists —
+ *                         a verified memo, the epoch high-water, the spell-set
+ *                         baseline — but none of it is ever SERVED in place of
+ *                         a live fetch that succeeded.) Fetches each
+ *                         spell's pretty `uri`.
  *   PINNED              — freeze to one audited immutable version. Set
  *                         DATAMANCY_PIN=sha256:<manifest-hash> (strongest:
  *                         trusts nothing but the hash) or DATAMANCY_VERSION=
@@ -35,8 +39,9 @@ import { fetchAndVerify, type FetchedResource } from "./resources.js";
 import {
   isVerificationFailure,
   UnknownResourceError,
+  UnknownSpellError,
   BadPinError,
-  BadParamsError,
+  InvariantError,
   VersionNotFoundError,
   PinMismatchError,
   RollbackError,
@@ -48,9 +53,27 @@ export interface VerifiedManifest {
   manifest: Manifest;
 }
 
-/** The result of reading one spell: verified content + any set-change to surface. */
+/** A manifest load, with whether it came fresh from the origin or from the
+ *  last-known-good memo. Carried rather than logged, for the same reason spell
+ *  content carries it: stderr is the operator's channel, not the model's. */
+interface LoadedManifest extends VerifiedManifest {
+  provenance: Provenance;
+}
+
+/**
+ * How the bytes in hand were obtained. Structural, because the two outcomes are
+ * not interchangeable and the type was previously unable to tell them apart:
+ * a caller handed `last-known-good` after a hash mismatch must say so, not pass
+ * the bytes off as freshly verified. The loud log goes to stderr, which the
+ * model on the other end of a tool call never sees.
+ */
+export type Provenance = "verified" | "last-known-good";
+
+/** The result of reading one spell: the content, how it was obtained, and any
+ *  set-change to surface. */
 export interface SpellRead {
   fetched: FetchedResource;
+  provenance: Provenance;
   setChange: SpellSetChange | null;
 }
 
@@ -58,6 +81,7 @@ export interface SpellRead {
  *  so a client re-sourcing via resources/list gets the list_changed nudge too. */
 export interface SpellList {
   resources: Resource[];
+  provenance: Provenance;
   setChange: SpellSetChange | null;
 }
 
@@ -68,6 +92,26 @@ export interface SpellList {
 // serving stale. The bound is a hang backstop, not a freshness deadline.
 const COLD_TIMEOUT_MS = 15_000;
 const WARM_TIMEOUT_MS = 5_000;
+
+// The bounds above are tuned against the public origin. DATAMANCY_SITE lets an
+// org serve the grimoire from its own host, and a mirror behind a VPN or auth
+// proxy can legitimately be slower than either — with no recourse in a package
+// that is never patched, a fixed bound would pin such an operator to
+// last-known-good silently and permanently. The override scales both bounds
+// together, so their RELATIONSHIP (warm is the tighter backstop) is preserved
+// ABOVE the floor; at MIN_TIMEOUT_MS the two coincide, because warm cannot be
+// clamped below a bound cold already sits on. The constructor says the same
+// where it computes them.
+const MIN_TIMEOUT_MS = 1_000;
+
+// `AbortSignal.timeout` is setTimeout-backed, and setTimeout overflows above
+// 2**31-1 ms — the delay wraps to ~1ms. So an operator who set
+// DATAMANCY_TIMEOUT_MS=3000000000 ("just make it huge") would get a ~1ms budget
+// on EVERY fetch: cold boot fails, warm serves last-known-good forever, and the
+// only signal is a Node warning on stderr. A larger declared budget producing a
+// smaller one is the sharpest edge an escape hatch can have, so it is clamped
+// to what the host can actually express.
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 // Bound the chain walk when resolving a version LABEL to a hash. Unbounded, a
 // deep or never-matching DATAMANCY_VERSION would fetch+verify the entire signed
@@ -82,6 +126,10 @@ export interface GrimoireConfig {
   pinHash?: string | null;
   /** DATAMANCY_VERSION — a friendly version (serverInfo.version / ISO8601). */
   version?: string | null;
+  /** DATAMANCY_TIMEOUT_MS — the COLD budget; the warm backstop scales with it.
+   *  For an origin slower than the public one (a self-hosted mirror behind a
+   *  proxy). Omitted or unparseable → the defaults. */
+  timeoutMs?: number | null;
   /**
    * Override the manifest-verification key. Defaults to the pinned production
    * key; only tests pass this (with a throwaway keypair) to exercise the
@@ -114,14 +162,32 @@ export class Grimoire {
   private readonly version: string | null;
   /** Verification key (default pinned; tests override — see GrimoireConfig). */
   private readonly verifyKey?: KeyObject;
+  private readonly coldTimeoutMs: number;
+  private readonly warmTimeoutMs: number;
 
   /** Last verified-good manifest (with its hash) — last-known-good fallback. */
   private manifestMemo: VerifiedManifest | null = null;
+
+  /** The one manifest load currently in flight, or null. Read and written only
+   *  in `loadManifest`, synchronously around the call — see its header for why
+   *  a coalescer (cleared on settle) and never a cache (held after settle). */
+  private manifestInFlight: Promise<LoadedManifest> | null = null;
   /** Pinned content is immutable, so it loads exactly once and freezes. */
   private frozenManifest: VerifiedManifest | null = null;
-  private contentMemo = new Map<string, FetchedResource>();
+  /** Last-known-good content, STAMPED with the manifest epoch it verified
+   *  against. The stamp is what makes the memo monotone: two concurrent reads
+   *  straddling a publish each verify correctly against their own manifest, and
+   *  whichever resolves LAST would otherwise win — settling the memo on the
+   *  OLDER bytes, which every later transport blip then serves as
+   *  "last-known-good". Last-to-resolve is not newest. */
+  private contentMemo = new Map<string, { fetched: FetchedResource; epoch: number }>();
   /** Sorted spell-name set last seen — detects spell add/remove (live mode). */
   private knownSpellSet: string | null = null;
+  /** The manifest epoch the baseline above reflects. Without it the baseline is
+   *  ordered by ARRIVAL, and a read that loaded legitimately before a publish
+   *  can observe after one that loaded later — rewinding the set and reporting
+   *  a removal that never happened upstream. */
+  private knownSpellSetEpoch = Number.NEGATIVE_INFINITY;
   /** Highest manifest `epoch` verified this session — the rollback high-water
    *  mark. A live `latest` whose epoch regressed below this is a replay. */
   private highestEpoch = Number.NEGATIVE_INFINITY;
@@ -131,6 +197,23 @@ export class Grimoire {
     private readonly log: (...args: unknown[]) => void,
   ) {
     this.site = config.site.replace(/\/+$/, "");
+    // CLAMPED, not discarded. A request below the floor used to be thrown away
+    // and silently replaced by the 15s default — 30x what was asked — which is
+    // the opposite of what an operator lowering it intends.
+    const requested = config.timeoutMs;
+    const cold =
+      typeof requested === "number" && Number.isFinite(requested)
+        ? Math.min(Math.max(requested, MIN_TIMEOUT_MS), MAX_TIMEOUT_MS)
+        : COLD_TIMEOUT_MS;
+    this.coldTimeoutMs = cold;
+    // The warm backstop stays proportional, floored at the same minimum. At the
+    // floor the two are EQUAL rather than warm being tighter — there is no room
+    // below MIN_TIMEOUT_MS for them to differ, and saying so beats a comment
+    // promising a relationship the arithmetic cannot hold there.
+    this.warmTimeoutMs = Math.max(
+      MIN_TIMEOUT_MS,
+      Math.round(cold * (WARM_TIMEOUT_MS / COLD_TIMEOUT_MS)),
+    );
     this.version = config.version ?? null;
     this.verifyKey = config.verifyKey;
     if (config.pinHash) {
@@ -146,6 +229,30 @@ export class Grimoire {
       this.mode = "live";
       this.pinHash = null;
     }
+  }
+
+  /** Is this grimoire frozen to one immutable version (by hash or by label)?
+   *  The entry point used to re-derive this by re-reading DATAMANCY_PIN and
+   *  DATAMANCY_VERSION — a second, independent answer to a question this
+   *  object already settled in its constructor, free to disagree with it. */
+  isFrozen(): boolean {
+    return this.mode === "pinned";
+  }
+
+  /**
+   * The origin this grimoire actually fetches from — NORMALISED, as the
+   * constructor stored it.
+   *
+   * The entry point printed `process.env.DATAMANCY_SITE` directly instead, and
+   * the two normalise differently: the constructor strips trailing slashes and
+   * a raw env read does not. So `DATAMANCY_SITE=https://datamancy.dev/` made
+   * `datamancy current` compare unequal to the default and tell an operator
+   * standing on the canonical origin that the hash was "YOUR mirror's". Same
+   * defect as the posture re-derivation `isFrozen` closes, one field over: a
+   * second derivation of a question this object already answered.
+   */
+  origin(): string {
+    return this.site;
   }
 
   /** Human-readable description of the active posture (for boot logs). */
@@ -174,24 +281,81 @@ export class Grimoire {
     return new URL(pathOrUrl, `${this.site}/`).toString();
   }
 
-  /** Cold (no fallback) gets a generous budget; warm has a fixed backstop. */
-  private timeoutFor(haveMemo: boolean): number {
-    return haveMemo ? WARM_TIMEOUT_MS : COLD_TIMEOUT_MS;
+  /**
+   * The ONE place a fetch deadline is minted. Cold (no fallback to degrade to)
+   * gets the generous budget; warm has a tighter backstop, because a slow
+   * origin should lose to a verified copy we already hold.
+   *
+   * Every fetch is bounded, including the ones no caller passes a signal for.
+   * The version walk and the CLI ran unbounded: an origin that accepted the
+   * connection and never answered hung `datamancy current`, `datamancy
+   * versions`, and — worst — BOOT under DATAMANCY_VERSION, where the client
+   * sees a server that never finishes initialize and never errors.
+   *
+   * The cold/warm selection was a separate `timeoutFor` method, and two of the
+   * four fetch sites called it and minted their own `AbortSignal.timeout`
+   * instead of coming through here — same value today, and outside any change
+   * made to this door tomorrow. Inlined so there is no second thing to call.
+   */
+  private budget(haveMemo: boolean): AbortSignal {
+    return AbortSignal.timeout(
+      haveMemo ? this.warmTimeoutMs : this.coldTimeoutMs,
+    );
   }
 
   /**
-   * Load the manifest for the active posture. Live: fetch the moving latest,
-   * fresh each call, memo fallback. Pinned: fetch the immutable snapshot
-   * once, assert its hash equals the pin, then freeze it.
+   * Load the manifest for the active posture, COALESCING concurrent loads.
+   *
+   * The stdio loop deliberately does not await one request before reading the
+   * next, and a JSON-RPC batch dispatches through `Promise.all` — so N loads
+   * are genuinely in flight against this one object. Un-coalesced, each did its
+   * own manifest fetch, signature fetch and ECDSA verify, and — worse — N loads
+   * straddling a publish resolved with DIFFERENT epochs. The later-resolving
+   * older one then tripped the rollback guard below and was reported to the
+   * operator as `VERIFICATION FAILED … or the content was tampered with`, and
+   * to the model as a `STALE_NOTICE` on bytes that were the newest available
+   * and had been verified seconds earlier. Two callers, identical bytes,
+   * opposite provenance. The race manufactured a tamper alarm and a lie.
+   *
+   * One shared in-flight promise removes the divergence at its source: within a
+   * window there is one fetch, one verify, one epoch, one answer.
+   *
+   * It is a COALESCER, not a cache — the slot is cleared when the promise
+   * settles, including on rejection. Holding a resolved promise would make this
+   * the boot snapshot the module header promises it is not, and would freeze
+   * the spell set forever; holding a rejected one would make a single transport
+   * blip sticky for the life of the process.
+   *
+   * `observeSetChange` stays OUTSIDE this — it is called by `list()` and
+   * `readEntry()` on their own ticks. That placement is load-bearing: moving it
+   * inside would compute the diff once and hand the same non-null `setChange`
+   * to all N callers, firing N `list_changed` notifications where one is
+   * correct, and would break `readEntry`'s advance-after-delivery ordering.
+   *
+   * One accepted cost: a late joiner inherits the deadline the first caller
+   * minted, so it can fall back on a budget it did not fully get. The budget is
+   * a hang backstop rather than a freshness deadline, so this is bounded.
    */
-  private async loadManifest(): Promise<VerifiedManifest> {
+  private async loadManifest(): Promise<LoadedManifest> {
+    if (this.manifestInFlight) return this.manifestInFlight;
+    const load = this.loadManifestUncoalesced();
+    this.manifestInFlight = load;
+    try {
+      return await load;
+    } finally {
+      this.manifestInFlight = null;
+    }
+  }
+
+  private async loadManifestUncoalesced(): Promise<LoadedManifest> {
     if (this.mode === "pinned" && this.frozenManifest) {
-      return this.frozenManifest; // immutable — loaded once, never re-fetched
+      // Immutable — loaded once, never re-fetched, and verified when it was.
+      return { ...this.frozenManifest, provenance: "verified" };
     }
     if (this.mode === "pinned" && this.pinHash === null) {
       // Version pin not yet resolved — preflight() resolves it first. Guard so
       // an out-of-order direct call can't fetch the nonsense /manifests/null/.
-      throw new BadParamsError(
+      throw new InvariantError(
         "Pinned-by-version requires preflight() to resolve the version first.",
       );
     }
@@ -199,9 +363,7 @@ export class Grimoire {
       this.mode === "pinned"
         ? this.snapshotManifestUrl(this.pinHash as string)
         : this.liveManifestUrl();
-    const signal = AbortSignal.timeout(
-      this.timeoutFor(this.manifestMemo !== null),
-    );
+    const signal = this.budget(this.manifestMemo !== null);
     const expectHash = this.mode === "pinned" ? this.pinHash : null;
     try {
       const vm = await this.fetchOne(url, expectHash, signal);
@@ -213,6 +375,13 @@ export class Grimoire {
       // loads can't race it: whichever verified manifest resolves first sets the
       // high-water mark; a later-resolving OLDER one is rejected here — before it
       // can overwrite the memo, rewind the spell set, or re-emit list_changed.
+      // rune:purgare(safety-margin) — this `live` condition is defensive, not
+      // load-bearing: pinned mode loads once and freezes, and the high-water
+      // starts at -Infinity, so a pinned load cannot regress and deleting the
+      // condition changes no observable behaviour (verified by mutation). It
+      // stays so that a future change making pinned mode re-load cannot
+      // silently inherit live's rollback semantics for a version the operator
+      // deliberately chose.
       if (this.mode === "live") {
         const ep = vm.manifest.epoch; // required field — always present
         if (ep < this.highestEpoch) {
@@ -222,11 +391,11 @@ export class Grimoire {
       }
       this.manifestMemo = vm; // remember ONLY verified-good (manifest + its hash)
       if (this.mode === "pinned") this.frozenManifest = vm; // freeze
-      return vm;
+      return { ...vm, provenance: "verified" };
     } catch (err) {
       if (this.manifestMemo) {
         this.warnFallback(err, "manifest");
-        return this.manifestMemo;
+        return { ...this.manifestMemo, provenance: "last-known-good" };
       }
       throw err;
     }
@@ -238,13 +407,14 @@ export class Grimoire {
    *  nudge must fire here too, not only on read(); otherwise a list that
    *  straddles an upstream change silently eats it. */
   async list(): Promise<SpellList> {
-    const { manifest } = await this.loadManifest();
+    const { manifest, provenance } = await this.loadManifest();
     const setChange = this.observeSetChange(manifest);
     return {
       resources: manifest.resources.map((r) => ({
         ...r,
         uri: this.resolve(r.uri),
       })),
+      provenance,
       setChange,
     };
   }
@@ -255,9 +425,24 @@ export class Grimoire {
    *  the advanced baseline. Shared by list() and read() so the nudge fires on
    *  whichever call the client uses to re-source. */
   private observeSetChange(manifest: Manifest): SpellSetChange | null {
+    // Refuse to observe with a manifest OLDER than the one the baseline already
+    // reflects. The rollback guard in loadManifest orders the manifests, but it
+    // runs on the load's tick and this runs after a content fetch — so a slow
+    // read holding a legitimately-loaded older manifest arrives here behind a
+    // faster read holding a newer one. Without this check it rewinds the set,
+    // fires a fabricated removal, and makes the real change report twice.
+    //
+    // Check and advance are one synchronous block — no await between the read,
+    // the compare, and the two assignments — so concurrent casts cannot tear it.
+    if (manifest.epoch < this.knownSpellSetEpoch) return null;
     const prevKey = this.knownSpellSet;
-    this.knownSpellSet = Grimoire.spellSetKey(manifest.resources);
-    return Grimoire.spellSetDiff(prevKey, manifest);
+    // The key is minted ONCE and both stored and diffed against. It used to be
+    // computed here and then computed again, from the same array, inside
+    // spellSetDiff on the very next line.
+    const key = Grimoire.spellSetKey(manifest.resources);
+    this.knownSpellSet = key;
+    this.knownSpellSetEpoch = manifest.epoch;
+    return Grimoire.spellSetDiffFrom(prevKey, key, manifest);
   }
 
   /**
@@ -266,34 +451,121 @@ export class Grimoire {
    * SHA-256 + size verified against the manifest entry.
    */
   async read(uri: string): Promise<SpellRead> {
-    const { manifest } = await this.loadManifest();
-    // Detect a spell-SET change vs what the client last saw (and advance the
-    // baseline) — shared with list() so the nudge fires on either path.
-    const setChange = this.observeSetChange(manifest);
-
     // The client passes the resolved (absolute) uri we exposed in list().
-    const resource = manifest.resources.find(
+    return this.readEntry(
       (r) => this.resolve(r.uri) === uri,
+      () => new UnknownResourceError(uri),
     );
+  }
+
+  /**
+   * Read one spell by its SHORT NAME — what `fetch_spell` speaks, for hosts
+   * that only expose tools and so never see `resources/list`.
+   *
+   * Name→entry resolution happens against the SAME manifest load that the read
+   * then uses, so a name can never resolve against one manifest and fetch
+   * against another. Everything downstream — signature, hash, size, UTF-8,
+   * memo, fallback — is the identical path `read(uri)` takes: one pipeline,
+   * two mouths. There is no per-spell branch here and there must never be one;
+   * a spell added to the website is a new manifest row, visible with no
+   * package change.
+   */
+  async readByName(name: string): Promise<SpellRead> {
+    return this.readEntry(
+      (r) => r.name === name,
+      // Hand back the catalog from the CURRENT verified manifest — never a
+      // baked-in list.
+      (manifest) =>
+        new UnknownSpellError(
+          name,
+          manifest.resources.map((r) => r.name).sort(),
+        ),
+    );
+  }
+
+  /**
+   * The ONE ordering contract both addressing modes obey: load, resolve the
+   * entry, fetch it, and only THEN advance the spell-set baseline.
+   *
+   * The order is the correctness. `observeSetChange` is a destructive read —
+   * it advances `knownSpellSet` and returns the diff exactly once — so a throw
+   * between the advance and the caller's `surface()` silently eats the
+   * `list_changed` notification for the rest of the session. Advancing last
+   * means the baseline moves only on a delivery that actually reaches the
+   * caller, and whoever advances it is the one who reports it.
+   *
+   * That failure was reachable from BOTH read paths and had to be fixed in one
+   * place, not two: two copies of an ordering rule is the shape that let the
+   * miss path drift from the hit path in the first place.
+   */
+  private async readEntry(
+    select: (r: Resource) => boolean,
+    onMiss: (manifest: Manifest) => Error,
+  ): Promise<SpellRead> {
+    const { manifest, provenance: manifestProvenance } = await this.loadManifest();
+    const resource = manifest.resources.find(select);
     if (!resource) {
-      throw new UnknownResourceError(uri);
+      throw onMiss(manifest); // baseline untouched — the nudge survives
     }
-    // Pinned mode fetches the immutable content-addressed blob (always present
-    // — a required field); live mode fetches the pretty uri.
-    const path = this.mode === "pinned" ? resource.blob : resource.uri;
-    const fetchUrl = this.resolve(path);
-    const signal = AbortSignal.timeout(
-      this.timeoutFor(this.contentMemo.has(uri)),
-    );
+    const { fetched, provenance: contentProvenance } =
+      await this.fetchResource(resource, manifest.epoch);
+    // A spell is only "verified" if BOTH the manifest that named it and the
+    // bytes it resolved to came fresh. Reporting the content as verified while
+    // the manifest behind it was stale would hide half the failure.
+    const provenance: Provenance =
+      manifestProvenance === "verified" && contentProvenance === "verified"
+        ? "verified"
+        : "last-known-good";
+    return { fetched, provenance, setChange: this.observeSetChange(manifest) };
+  }
+
+  /**
+   * Fetch + verify one manifest entry, with the last-known-good memo. Keyed by
+   * the entry's RESOLVED uri — the same key both read paths produce, so a
+   * `fetch_spell` by name and a `resources/read` by uri share one memo entry
+   * and can never disagree about a spell's bytes.
+   */
+  private async fetchResource(
+    resource: Resource,
+    epoch: number,
+  ): Promise<{ fetched: FetchedResource; provenance: Provenance }> {
+    // The memo is keyed by the PRETTY uri in both modes, so one spell has one
+    // entry however it was fetched. Pinned mode fetches the immutable
+    // content-addressed blob (always present — a required field); live mode
+    // fetches that same pretty uri, which is why it reuses the key rather than
+    // resolving the identical string a second time.
+    const key = this.resolve(resource.uri);
+    const fetchUrl = this.mode === "pinned" ? this.resolve(resource.blob) : key;
+    const signal = this.budget(this.contentMemo.has(key));
+    // (has() is a monotone latch — entries are only ever added, never evicted —
+    // so a stale read of it can only choose the MORE generous budget.)
     try {
       const fetched = await fetchAndVerify(resource, signal, fetchUrl);
-      this.contentMemo.set(uri, fetched); // remember ONLY verified-good
-      return { fetched, setChange };
+      // Remember ONLY verified-good, and only if it is not OLDER than what is
+      // already remembered. The compare-and-set is fully synchronous — no await
+      // between the read and the write — so concurrent readers cannot tear it.
+      //
+      // BEWARE what this does and does not buy. The rollback guard in
+      // loadManifest already refuses a regressed epoch and falls back to the
+      // highest-epoch memo, so in practice the epoch arriving here is already
+      // monotone and this branch is not expected to fire. It does NOT close the
+      // equal-epoch case: two manifests published in the same second are both
+      // accepted by design, and last-writer-wins still decides between them.
+      // Kept as the invariant's local statement — if the rollback guard ever
+      // changes, this is the line that keeps the memo from regressing.
+      const held = this.contentMemo.get(key);
+      if (!held || epoch >= held.epoch) {
+        this.contentMemo.set(key, { fetched, epoch });
+      }
+      return { fetched, provenance: "verified" };
     } catch (err) {
-      const memo = this.contentMemo.get(uri);
+      const memo = this.contentMemo.get(key)?.fetched;
       if (memo) {
-        this.warnFallback(err, uri);
-        return { fetched: memo, setChange };
+        this.warnFallback(err, key);
+        // The bytes are previously-verified, but they are NOT what the origin
+        // just served. The caller carries that fact onward; it is not a log
+        // line's job, because the log goes to stderr and the model reads stdout.
+        return { fetched: memo, provenance: "last-known-good" };
       }
       throw err;
     }
@@ -309,7 +581,9 @@ export class Grimoire {
       this.log(`resolved version ${this.version} → sha256:${this.pinHash}`);
     }
     const vm = await this.loadManifest();
-    this.knownSpellSet = Grimoire.spellSetKey(vm.manifest.resources);
+    // Seed the baseline through the one door that owns it, so "advance the
+    // baseline" has a single writer rather than two that must agree.
+    this.observeSetChange(vm.manifest);
     return vm;
   }
 
@@ -358,9 +632,24 @@ export class Grimoire {
     prevKey: string | null,
     manifest: Manifest,
   ): SpellSetChange | null {
-    const names = manifest.resources.map((r) => r.name);
-    const key = Grimoire.spellSetKey(manifest.resources);
+    return Grimoire.spellSetDiffFrom(
+      prevKey,
+      Grimoire.spellSetKey(manifest.resources),
+      manifest,
+    );
+  }
+
+  /** The diff proper, for a caller that already holds the manifest's key.
+   *  `observeSetChange` mints that key to store as the new baseline, so having
+   *  it recompute the identical key here was pure duplication. The name list is
+   *  built only past the early return — the unchanged case is the common one. */
+  private static spellSetDiffFrom(
+    prevKey: string | null,
+    key: string,
+    manifest: Manifest,
+  ): SpellSetChange | null {
     if (prevKey === null || prevKey === key) return null;
+    const names = manifest.resources.map((r) => r.name);
     const prevSet = new Set(prevKey.split("\n"));
     const curSet = new Set(names);
     return {
@@ -372,7 +661,12 @@ export class Grimoire {
 
   /** The current (latest) version. */
   async currentVersion(): Promise<VersionInfo> {
-    const { hash, manifest } = await this.fetchOne(this.liveManifestUrl(), null);
+    const { hash, manifest } = await this.fetchOne(
+      this.liveManifestUrl(),
+      null,
+      // No memo to degrade to on this path, so the generous budget is correct.
+      this.budget(false),
+    );
     return Grimoire.info(hash, manifest);
   }
 
@@ -383,12 +677,22 @@ export class Grimoire {
    * home for chain traversal; listVersions and resolveVersion both consume it.
    */
   private async *walkChain(
-    limit = Number.POSITIVE_INFINITY,
+    // Requested bound. CLAMPED below to MAX_VERSION_WALK rather than trusted:
+    // `listVersions` is public and passes its argument straight through, so
+    // `Infinity` was still one supplied argument away. A bound that can be
+    // argued away from outside is a convention, not a structure.
+    requestedLimit: number,
   ): AsyncGenerator<VerifiedManifest> {
+    const limit = Math.min(requestedLimit, MAX_VERSION_WALK);
+    // ONE deadline for the WHOLE walk, created here and threaded through every
+    // hop. A per-hop budget bounds each fetch and leaves the walk unbounded:
+    // 100 hops × the cold budget is ~25 minutes, which at MCP `initialize`
+    // timescales is indistinguishable from the hang this was meant to close.
+    const signal = this.budget(false);
     let url = this.liveManifestUrl();
     let expect: string | null = null;
     for (let i = 0; i < limit; i++) {
-      const hop = await this.fetchOne(url, expect);
+      const hop = await this.fetchOne(url, expect, signal);
       yield hop;
       if (!hop.manifest.previous) return;
       expect = hop.manifest.previous.replace(/^sha256:/, "");
@@ -396,11 +700,41 @@ export class Grimoire {
     }
   }
 
-  /** Walk the signed chain from latest, newest first (each hop verified). */
+  /**
+   * Walk the signed chain from latest, newest first (each hop verified).
+   *
+   * A LISTING truncates rather than fails. One unfetchable hop used to discard
+   * every row already signature-verified above it and exit non-zero — so a
+   * single dangling backpointer anywhere in published history made `datamancy
+   * versions` print nothing at all, and the operator learned "HTTP 404" instead
+   * of "your chain is broken here, and these 17 versions are fine".
+   *
+   * Two failures are NOT truncated, because truncating them would launder a
+   * fact the caller needs:
+   *   - a VERIFICATION failure — a bad signature or a hash mismatch mid-walk is
+   *     a tamper, and a short list is not an acceptable answer to a tamper;
+   *   - a failure on the FIRST hop — there is no partial answer to degrade to,
+   *     and "the origin is unreachable" must not read as "no versions exist".
+   *
+   * `resolveVersion` deliberately does NOT share this: it is a lookup, and a
+   * truncated walk cannot prove a label absent. It still throws.
+   */
   async listVersions(limit = 50): Promise<VersionInfo[]> {
     const out: VersionInfo[] = [];
-    for await (const { hash, manifest } of this.walkChain(limit)) {
-      out.push(Grimoire.info(hash, manifest));
+    try {
+      for await (const { hash, manifest } of this.walkChain(limit)) {
+        out.push(Grimoire.info(hash, manifest));
+      }
+    } catch (err) {
+      if (isVerificationFailure(err) || out.length === 0) throw err;
+      this.log(
+        `chain BROKEN after ${out.length} version(s) — the oldest listed names a ` +
+          `previous snapshot the origin did not serve. Listing what verified; ` +
+          `history below this point is unreachable by label (an exact ` +
+          `DATAMANCY_PIN still works). Cause: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+      );
     }
     return out;
   }

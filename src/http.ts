@@ -15,16 +15,27 @@
  * one chunk, no matter what the origin sends.
  */
 
-/** A body exceeded its cap before fully reading — carries how far it got. */
-export class BodyTooLargeError extends Error {
-  constructor(
-    public readonly cap: number,
-    public readonly read: number,
-  ) {
-    super(`Response body exceeded the ${cap}-byte cap (read at least ${read}).`);
-    this.name = "BodyTooLargeError";
-  }
-}
+import type { DatamancyError } from "./errors.js";
+
+/**
+ * How a caller classifies an overflow.
+ *
+ * Overflow means different things at different call sites — an over-ceiling
+ * MANIFEST is a transport failure (we never got usable bytes), while an
+ * over-declared-size CONTENT body is a verification failure (the origin served
+ * more than the signed manifest promised), and those route to opposite halves
+ * of the loud/quiet gate. This function is how the call site says which.
+ *
+ * Taking it as a REQUIRED argument is the point. Overflow used to throw a bare
+ * `BodyTooLargeError` that sat outside the error hierarchy — unable to declare
+ * either axis — and three call sites each hand-wrote an `instanceof` catch to
+ * put it back. Three copies of a classification is the hand-maintained
+ * allow-list `errors.ts` opens by forbidding, and a fourth caller that forgot
+ * the catch would have shipped an unclassified error onto the wire and turned
+ * a verification failure into a quiet transport blip. Now a capped read cannot
+ * be obtained without answering the question.
+ */
+export type OverflowClassifier = (cap: number, read: number) => DatamancyError;
 
 /** Fixed ceilings for bodies with no manifest-declared size. Manifests are
  *  small JSON; a detached P-256 DER signature is ~72 bytes. Generous, but
@@ -44,13 +55,15 @@ export const MAX_RESOURCE_BYTES = 16 * 1024 * 1024; // 16 MiB
 
 /**
  * Read a fetch Response body, streaming, aborting if cumulative bytes exceed
- * `maxBytes`. Returns the exact bytes (≤ maxBytes). Throws BodyTooLargeError
- * on overflow (the stream is cancelled first, so nothing further is buffered);
- * any other read failure propagates to the caller to classify as transport.
+ * `maxBytes`. Returns the exact bytes (≤ maxBytes). On overflow the stream is
+ * cancelled first, then `onOverflow` builds the error this call site wants —
+ * so nothing further is buffered and nothing escapes unclassified. Any other
+ * read failure propagates to the caller to classify as transport.
  */
 export async function readCappedBody(
   res: Response,
   maxBytes: number,
+  onOverflow: OverflowClassifier,
 ): Promise<Uint8Array> {
   const body = res.body;
   if (!body) {
@@ -72,7 +85,7 @@ export async function readCappedBody(
       total += value.byteLength;
       if (total > maxBytes) {
         await reader.cancel();
-        throw new BodyTooLargeError(maxBytes, total);
+        throw onOverflow(maxBytes, total);
       }
       chunks.push(value);
     }

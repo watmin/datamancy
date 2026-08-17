@@ -4,20 +4,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Grimoire } from "../dist/grimoire.js";
+import { networkGate } from "./helpers.mjs";
 
 const SITE = process.env.DATAMANCY_TEST_SITE || "https://datamancy.dev";
 const noop = () => {};
 
-let online = false;
-try {
-  const r = await fetch(`${SITE}/.well-known/mcp/manifest.json`, {
-    signal: AbortSignal.timeout(8000),
-  });
-  online = r.ok;
-} catch {
-  online = false;
-}
-const gate = online ? false : `${SITE} unreachable — skipping integration`;
+const gate = await networkGate(SITE);
 
 test("live: lists, reads, and verifies against the real pinned key", { skip: gate }, async () => {
   const g = new Grimoire({ site: SITE }, noop);

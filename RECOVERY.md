@@ -4,16 +4,25 @@ Two failure modes, and **neither is a consumer emergency**:
 
 - **Compromise** — someone gains `kms:Sign` access *and* your hosting, and posts
   validly-signed malicious files. Recovery = remove the bad files + close the
-  access. Same key, no version change, no consumer action. (Below.)
+  access. Same key, no version change, no consumer action — **unless** an
+  attacker-signed snapshot may have circulated out of band, in which case the
+  only full invalidation is a new major (step 2 below says how to tell). (Below.)
 - **Loss** — the key becomes unavailable (account closed/locked-out, a KMS
   catastrophe, or deletion past the waiting period). You can no longer *sign*,
   but consumers are unharmed: they verify already-signed content against the
   pinned pubkey forever, and the grimoire simply freezes at its last-signed
   state. To *resume publishing* you provision a new key → a new pinned key → a
-  new **major** (`datamancy 2.0.0`). **The major version IS the key generation:**
-  `1.x` trusts this key; lose it, `2.x` trusts the next; lose that, `3.x`. There
-  is no backup key and no in-major rotation — by deliberate design. (See *If the
-  key is lost*, below.)
+  new **major** (`datamancy 2.0.0`). **A new key generation always forces a new
+  major** — `1.x` trusts this key, and the next key ships as a new major. The
+  implication runs one way only: a major may also be minted for reasons that
+  leave the key untouched (a manifest-format break, MCP capability-shape drift —
+  see CONTRACT.md's *End-of-life*), so a new major does **not** by itself mean
+  the key changed. There is no backup key and no in-major rotation — by
+  deliberate design. (See *If the key is lost*, below.)
+
+  **So on seeing a new major, check.** The release notes and the published
+  fingerprint say whether the trust root moved; if it did, re-verify it through
+  the independent channels in the README before trusting the new line.
 
 The key lives in AWS KMS, non-exportable: the *material* can't be stolen, but
 *access to it* can be abused (compromise) or *lost* (loss) — the two cases above.
@@ -27,13 +36,13 @@ The key lives in AWS KMS, non-exportable: the *material* can't be stolen, but
 | Signer (scoped, `kms:Sign` only) | SSO profile `datamancy-signer` — by design it **cannot** disable the key |
 | Admin (to disable the key) | admin access to the account — the Console, or any session with `kms:DisableKey`. You'll know how to get it. |
 | Channel | datamancy.dev = Cloudflare Pages ← GitHub `watmin/datamancy.dev` |
-| Trust root | pinned pubkey in `datamancy/src/pinned-pubkey.ts` |
+| Trust root (the key) | pinned pubkey in `datamancy/src/pinned-pubkey.ts` (shipped as `dist/pinned-pubkey.js`). The full frozen set is the key, the manifest format major, the paths, and the signature scheme — see CONTRACT.md; only the key has independent publication channels. |
 
 ## What an attacker can actually do
 
 | They have… | Can sign? | Can serve? | Reaches consumers? |
 |---|---|---|---|
-| Hosting only (GitHub/Cloudflare) | ✗ | ✓ | **No** — unsigned content is rejected by every consumer |
+| Hosting only (GitHub/Cloudflare) | ✗ | ✓ | **Partly.** Forged content: no — unsigned bytes are rejected by every consumer. But they need not forge anything: every past snapshot under `manifests/<hash>/` is already validly signed, so they can REPLAY an authentic older one. In-session that is refused (the monotone `epoch`); across a restart or on first contact it is accepted by design — see README's *What this defeats*. A pinned consumer is immune. |
 | `kms:Sign` only (account breach) | ✓ | ✗ | **No** — they lack write access to the channel (Cloudflare/GitHub) |
 | **Both** | ✓ | ✓ | **Yes** — a validly-signed malicious manifest. The only real case. |
 
@@ -137,8 +146,12 @@ key, lose the line — but never the consumers, and never silently.
 
 - **Not key rotation.** A compromise of *access* is temporary `kms:Sign`
   permission, not a stolen secret. Fix the access, keep the key, no version
-  change. (A genuinely **lost** key — or an HSM-level compromise — is a different
-  thing entirely: a new major, see *If the key is lost* above.)
-- **Not republishing the npm package.** The pinned pubkey is unchanged.
+  change. (Three things ARE different and do take the new-major path: a genuinely
+  **lost** key, an HSM-level compromise, and — per step 2 — an access compromise
+  where attacker-signed snapshots may have escaped out of band, since a hash
+  someone already holds cannot be purged by deleting it from your host.)
+- **Not republishing the npm package.** The pinned pubkey is unchanged. (A
+  package republish is for a kernel change, which is a separate axis entirely —
+  see CONTRACT.md's *What a package minor may change*.)
 - **Not a consumer action.** Live consumers heal on their next fetch; pinned
   consumers were never exposed.

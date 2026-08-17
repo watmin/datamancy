@@ -14,6 +14,7 @@ import {
   resourceFor,
   bodyResponse,
   publicKey,
+  logCollector,
 } from "./helpers.mjs";
 
 const SITE = "https://test.invalid";
@@ -52,14 +53,6 @@ afterEach(() => {
   delayMs = 0;
 });
 
-function logCollector() {
-  const lines = [];
-  return {
-    log: (...a) => lines.push(a.map(String).join(" ")),
-    loud: () => lines.some((l) => /VERIFICATION FAILED|scary|[Rr]ollback/.test(l)),
-    quiet: () => lines.some((l) => /transport failure/.test(l)),
-  };
-}
 
 const live = (log) => new Grimoire({ site: SITE, verifyKey: publicKey }, log);
 
@@ -95,12 +88,27 @@ test("a higher epoch ADVANCES the high-water mark — a later regression to a on
   assert.ok(c.loud(), "the advance is real — 2000 is now a refused rollback, logged LOUD");
 });
 
-test("an EQUAL epoch is accepted (re-publish within the same second)", async () => {
+test("an EQUAL epoch is ACCEPTED — its content is served, not the memo's", async () => {
+  // `doesNotReject` alone could not fail here: a refused load falls back to the
+  // memo seeded by preflight(), so the call resolves whichever branch runs.
+  // Acceptance is only observable if the re-published manifest DIFFERS.
+  const republished = manifestFor(
+    [resourceFor("a", "x"), resourceFor("b", "y"), resourceFor("c", "z")],
+    { epoch: 2000 }, // the SAME epoch — a same-second re-publish
+  );
+  const bytes = bytesOf(republished);
   install();
   const g = live(() => {});
-  await g.preflight(); // 2000
-  serve = newer; // same epoch 2000
-  await assert.doesNotReject(() => g.list());
+  await g.preflight(); // epoch 2000, memo holds 2 resources
+  globalThis.fetch = async (url) =>
+    bodyResponse(String(url).endsWith(".sig") ? signBytes(bytes) : bytes);
+  const list = await g.list();
+  assert.equal(
+    list.resources.length,
+    3,
+    "an equal epoch must be accepted — 2 would mean it fell back to the memo",
+  );
+  assert.equal(list.provenance, "verified", "and accepted means freshly verified");
 });
 
 test("concurrent loads of a stale manifest NEVER poison the memo (order-independent)", async () => {
@@ -125,14 +133,33 @@ test("an OLDER manifest that RESOLVES LATER (slow) is still rejected", async () 
   install();
   const g = live(() => {});
   await g.preflight(); // 2000
-  // The stale manifest arrives slowly — but the synchronous high-water check
-  // rejects it on epoch, not on arrival timing.
+  // Genuinely concurrent: a SLOW older load overlapping a FAST newer one, so
+  // "resolves later" is relative to something. The previous version set a 40ms
+  // delay on a single sequential call — a duration standing in for an
+  // interleaving that never happened, and identical to the no-delay test above.
   serve = older;
   delayMs = 40;
-  assert.equal((await g.list()).resources.length, 2);
+  const slow = g.list();
+  await new Promise((r) => setImmediate(r));
+  serve = newer;
+  delayMs = 0;
+  const fast = g.list();
+  const [slowResult, fastResult] = await Promise.all([slow, fast]);
+  assert.equal(slowResult.resources.length, 2, "the slow older load never wins");
+  assert.equal(fastResult.resources.length, 2);
+  assert.equal((await g.list()).resources.length, 2, "and the memo was not poisoned");
 });
 
-test("pinned mode is EXEMPT from the rollback check (you chose an exact version)", async () => {
+test("a pinned LOW-epoch snapshot loads and serves — choosing an old version is legal", async () => {
+  // Renamed from "pinned mode is EXEMPT from the rollback check". That title
+  // claimed a branch this test cannot reach: pinned mode loads exactly once and
+  // then freezes, and the high-water mark starts at -Infinity, so the first
+  // load cannot regress regardless of the exemption. Deleting the `mode ===
+  // "live"` condition leaves the whole suite green — the branch is defensive,
+  // not load-bearing, and the source now says so with a rune.
+  //
+  // What IS observable, and what this asserts: pinning an epoch far below
+  // anything a live session would accept is legal and serves that snapshot.
   const pinned = manifestFor([resourceFor("a", "x")], { epoch: 5 });
   const pinnedBytes = bytesOf(pinned);
   const pinHash = sha(pinnedBytes);

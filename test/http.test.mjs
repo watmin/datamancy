@@ -3,9 +3,9 @@
 // known bound, and a non-UTF-8 spell fails LOUD instead of shipping mojibake.
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { DatamancyError } from "../dist/errors.js";
 import {
   readCappedBody,
-  BodyTooLargeError,
   MAX_MANIFEST_BYTES,
   MAX_SIGNATURE_BYTES,
 } from "../dist/http.js";
@@ -26,21 +26,58 @@ import {
 let restore = () => {};
 afterEach(() => restore());
 
+/** A caller-supplied classifier. Overflow has no single class: the same
+ *  condition is TRANSPORT for a manifest and VERIFICATION for content, which
+ *  is why readCappedBody demands the caller answer rather than throwing one
+ *  fixed type that three call sites then re-classified by instanceof. */
+class ProbeOverflowError extends DatamancyError {
+  severity = "verification";
+  audience = "operator";
+  constructor(cap, read) {
+    super(`probe: exceeded ${cap} (read ${read})`);
+    this.cap = cap;
+    this.read = read;
+  }
+}
+const overflow = (cap, read) => new ProbeOverflowError(cap, read);
+
+test("the classifier is REQUIRED — a capped read cannot skip classifying overflow", async () => {
+  // The structural half of the fix: there is no call shape that obtains bytes
+  // without having said what an overflow means.
+  await assert.rejects(
+    () => readCappedBody(new Response(new Uint8Array(101)), 100),
+    TypeError,
+  );
+});
+
+test("each call site classifies overflow for ITSELF — manifest transport, content verification", async () => {
+  const asTransport = (cap, read) => Object.assign(new Error("t"), { cap, read });
+  await assert.rejects(
+    () => readCappedBody(new Response(new Uint8Array(101)), 100, asTransport),
+    (err) => {
+      assert.equal(err.message, "t");
+      assert.equal(err.cap, 100);
+      assert.ok(err.read > 100, "the classifier is told how far the read got");
+      return true;
+    },
+  );
+});
+
 test("readCappedBody returns a body at exactly the cap", async () => {
   const body = new Uint8Array(100);
-  const out = await readCappedBody(new Response(body), 100);
+  const out = await readCappedBody(new Response(body), 100, overflow);
   assert.equal(out.byteLength, 100);
 });
 
 test("readCappedBody returns a short body unchanged", async () => {
-  const out = await readCappedBody(new Response(new Uint8Array(10)), 100);
+  const out = await readCappedBody(new Response(new Uint8Array(10)), 100, overflow);
   assert.equal(out.byteLength, 10);
 });
 
-test("readCappedBody throws BodyTooLargeError one byte over the cap", async () => {
+test("readCappedBody throws the CALLER's error one byte over the cap", async () => {
   await assert.rejects(
-    () => readCappedBody(new Response(new Uint8Array(101)), 100),
-    BodyTooLargeError,
+    () => readCappedBody(new Response(new Uint8Array(101)), 100, overflow),
+    ProbeOverflowError,
   );
 });
 
@@ -50,8 +87,8 @@ test("readCappedBody CANCELS the stream early — never drains an oversized body
   const counter = { pulled: 0 };
   const stream = countingStream(1000, 1024, counter);
   await assert.rejects(
-    () => readCappedBody(new Response(stream), 4 * 1024),
-    BodyTooLargeError,
+    () => readCappedBody(new Response(stream), 4 * 1024, overflow),
+    ProbeOverflowError,
   );
   assert.ok(
     counter.pulled <= 6,
