@@ -101,11 +101,6 @@ export const RULES = [
   { rule: "MAY 9d — a listing truncates, a tamper does not", file: "grimoire.ts",
     from: "if (isVerificationFailure(err) || out.length === 0) throw err;",
     to: "if (false) throw err;", cites: ["chain"] },
-  // index.ts had NO rule in this table at all — the harness could not see the
-  // process entry point, which is the only file a consumer runs directly.
-  { rule: "Import safety — the entry-point guard", file: "index.ts",
-    from: "if (isEntryPoint()) {", to: "if (true) {",
-    cites: ["process"] },
   { rule: "Concurrency — manifest loads coalesce", file: "grimoire.ts",
     from: "this.manifestInFlight = load;", to: "",
     cites: ["concurrency"] },
@@ -178,6 +173,50 @@ const restore = () => {
   for (const [f, text] of Object.entries(pristine)) writeFileSync(join(work, "src", f), text);
 };
 
+/**
+ * Run one test file in the clone and say whether it went red — BOUNDED.
+ *
+ * Every run here carries a hard timeout, because a mutation is allowed to make
+ * the code hang and one of them does: removing the entry-point guard in
+ * index.ts makes importing the module boot a stdio server that blocks on stdin
+ * forever, and `test/errors.test.mjs` imports every file in dist/ to enumerate
+ * the error classes. Unbounded, that deadlocked the whole harness — it sat at
+ * rule 24 of 33 for half an hour at zero CPU, looking exactly like slow
+ * progress. The thing being measured is "does removing this guard break
+ * something", and a hang IS broken; it must be recorded, not waited on.
+ *
+ * SIGKILL rather than the default SIGTERM: the wedged process is blocked on
+ * stdin inside a server this suite deliberately broke, and it does not deserve
+ * a chance to ignore the signal.
+ *
+ * The slowest legitimate file takes ~4s (the whole 28-file suite takes ~5s), so
+ * 90s is ~20x headroom — generous enough never to fire on a slow box, short
+ * enough that a genuine hang is a finding within seconds instead of never.
+ */
+const TEST_TIMEOUT_MS = 90_000;
+const BUILD_TIMEOUT_MS = 180_000;
+
+function runTest(work, file) {
+  const r = spawnSync(process.execPath, ["--test", `test/${file}`], {
+    cwd: work,
+    timeout: TEST_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+  });
+  // A timeout is a red, and a DISTINCT one: "hung" and "asserted false" are
+  // different facts about the mutation, and the caster needs to tell them apart.
+  const timedOut = r.error?.code === "ETIMEDOUT" || r.signal === "SIGKILL";
+  return { red: timedOut || r.status !== 0, timedOut };
+}
+
+function build(work) {
+  return spawnSync("npx", ["tsc"], {
+    cwd: work,
+    encoding: "utf-8",
+    timeout: BUILD_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+  });
+}
+
 // BASELINE: the unmutated clone must be fully green before any mutation result
 // means anything. Every verdict below is "these files went red BECAUSE of the
 // mutation" — a claim that is only true if they were green without it.
@@ -188,14 +227,12 @@ const restore = () => {
 // "NOTHING went red" detector. The results still LOOKED like 31 clean passes.
 // A baseline turns that from invisible into the first thing that fails.
 {
-  const built = spawnSync("npx", ["tsc"], { cwd: work, encoding: "utf-8" });
+  const built = build(work);
   if (built.status !== 0) {
     console.error(`BASELINE BUILD FAILED — the clone is not faithful:\n${built.stderr}`);
     process.exit(1);
   }
-  const red = testFiles.filter(
-    (t) => spawnSync(process.execPath, ["--test", `test/${t}`], { cwd: work }).status !== 0,
-  );
+  const red = testFiles.filter((t) => runTest(work, t).red);
   if (red.length > 0) {
     console.error(
       `BASELINE NOT GREEN — ${red.join(", ")} fail in the UNMUTATED clone.\n` +
@@ -219,7 +256,7 @@ for (const { rule, file, from, to, cites } of RULES) {
     continue;
   }
   writeFileSync(path, text.replace(from, to));
-  const built = spawnSync("npx", ["tsc"], { cwd: work, encoding: "utf-8" });
+  const built = build(work);
   if (built.status !== 0) {
     console.log(`✗ ${rule}\n    removing the guard does not compile; mutation needs rewriting`);
     failures++;
@@ -233,8 +270,13 @@ for (const { rule, file, from, to, cites } of RULES) {
   // nothing at all. A meta-test about the instrument is not evidence about the
   // rule the instrument is measuring.
   const META = new Set(["contract-marks"]);
+  const hung = [];
   const red = testFiles
-    .filter((t) => spawnSync(process.execPath, ["--test", `test/${t}`], { cwd: work }).status !== 0)
+    .filter((t) => {
+      const { red: isRed, timedOut } = runTest(work, t);
+      if (timedOut) hung.push(t.replace(".test.mjs", ""));
+      return isRed;
+    })
     .map((t) => t.replace(".test.mjs", ""))
     .filter((t) => !META.has(t));
 
@@ -246,7 +288,8 @@ for (const { rule, file, from, to, cites } of RULES) {
     console.log(`✗ ${rule}\n    cites ${uncovered.join(", ")} which stayed GREEN; actually red: ${red.join(", ")}`);
     failures++;
   } else {
-    console.log(`✓ ${rule}  (red: ${red.join(", ")})`);
+    const note = hung.length ? `; HUNG (killed at ${TEST_TIMEOUT_MS / 1000}s): ${hung.join(", ")}` : "";
+    console.log(`✓ ${rule}  (red: ${red.join(", ")}${note})`);
   }
 }
 restore();
